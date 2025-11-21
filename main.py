@@ -77,8 +77,8 @@ LIQUIDITY_STATE_LAYOUT_V4 = Struct(
     "lpVault" / Bytes(32),
     "owner" / Bytes(32),
     # Padding for account alignment and future fields
-    # Total: (38 * 8) + (11 * 32) + 57 = 304 + 352 + 57 = 713 bytes
-    # This matches the typical Raydium V4 pool account structure
+    # Total: (38 * 8) + (12 * 32) + 57 = 304 + 384 + 57 = 745 bytes
+    # This matches the Raydium V4 pool account structure
     Padding(57),
 )
 
@@ -159,16 +159,24 @@ class MemeCoinBot:
         
         Note: This fetches program accounts from the Raydium V4 AMM program.
         In production with high RPC usage, consider:
-        - Using a dedicated RPC provider (QuickNode, Alchemy, etc.)
+        - Using a dedicated RPC provider (QuickNode, Alchemy, Helius, etc.)
         - Implementing websocket subscriptions for real-time updates
-        - Adding filters by pool creation time or other criteria
+        - Adding memcmp filters to query specific pool states
         - Implementing pagination for large result sets
+        - Caching results to reduce RPC calls
+        - Rate limiting to avoid hitting RPC endpoint limits
+        
+        For better performance, you could filter by:
+        - Pool creation time (memcmp on poolOpenTime field)
+        - Pool status (memcmp on status field)
+        - Specific token mints (memcmp on baseMint/quoteMint)
         """
         await self.start_session()
         
         try:
             # Get program accounts for Raydium V4 AMM
             # This may return many accounts; we limit to MAX_PAIRS_FETCH
+            # TODO: Add filters here for production use to reduce data transfer
             response = await self.solana_client.get_program_accounts(
                 Pubkey.from_string(RAYDIUM_V4_PROGRAM_ID),
                 commitment=Confirmed,
@@ -187,8 +195,9 @@ class MemeCoinBot:
                         if len(account_data) < MIN_POOL_DATA_SIZE:
                             continue
                         
-                        # Parse using our layout (only parse what we need)
-                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data[:MIN_POOL_DATA_SIZE])
+                        # Parse using our layout
+                        # Note: Construct will only parse the defined fields and ignore extra bytes
+                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
                         
                         # Convert to dict format
                         pool = {
