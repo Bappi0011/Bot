@@ -317,10 +317,6 @@ class MemeCoinBot:
 # Initialize bot instance
 bot_instance = MemeCoinBot()
 
-# Store user input state for custom values
-# Format: {user_id: {"type": "age_min"|"age_max"|"mc_min"|"mc_max"|"liq_min"|"liq_max"|"signal_time"|"signal_price"}}
-user_input_state = {}
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command"""
@@ -481,7 +477,7 @@ async def config_age(query) -> None:
         [InlineKeyboardButton("0-30 min", callback_data="set_age_0_30")],
         [InlineKeyboardButton("0-1 hour", callback_data="set_age_0_60")],
         [InlineKeyboardButton("0-24 hours", callback_data="set_age_0_1440")],
-        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_age_min"), 
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_age_min"),
          InlineKeyboardButton("✏️ Custom Max", callback_data="custom_age_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
@@ -518,7 +514,7 @@ async def config_marketcap(query) -> None:
         [InlineKeyboardButton("$0 - $500K", callback_data="set_mc_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_mc_0_1000000")],
         [InlineKeyboardButton("$0 - $10M", callback_data="set_mc_0_10000000")],
-        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_mc_min"), 
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_mc_min"),
          InlineKeyboardButton("✏️ Custom Max", callback_data="custom_mc_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
@@ -555,7 +551,7 @@ async def config_liquidity(query) -> None:
         [InlineKeyboardButton("$0 - $100K", callback_data="set_liq_0_100000")],
         [InlineKeyboardButton("$0 - $500K", callback_data="set_liq_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_liq_0_1000000")],
-        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_liq_min"), 
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_liq_min"),
          InlineKeyboardButton("✏️ Custom Max", callback_data="custom_liq_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
@@ -632,12 +628,10 @@ async def add_signal(query, data: str) -> None:
 
 async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
     """Handle custom value button clicks"""
-    user_id = query.from_user.id
-    parts = data.split("_")
     
     if data == "custom_signal":
         # Custom signal - need time AND price
-        user_input_state[user_id] = {"type": "signal_time"}
+        context.user_data["input_state"] = {"type": "signal_time"}
         await query.edit_message_text(
             "📈 **Custom Signal**\n\n"
             "Please enter the time interval in minutes:\n"
@@ -645,7 +639,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_age_min":
-        user_input_state[user_id] = {"type": "age_min"}
+        context.user_data["input_state"] = {"type": "age_min"}
         await query.edit_message_text(
             "⏰ **Custom Minimum Pair Age**\n\n"
             "Please enter minimum age in minutes:\n"
@@ -653,7 +647,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_age_max":
-        user_input_state[user_id] = {"type": "age_max"}
+        context.user_data["input_state"] = {"type": "age_max"}
         await query.edit_message_text(
             "⏰ **Custom Maximum Pair Age**\n\n"
             "Please enter maximum age in minutes:\n"
@@ -661,7 +655,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_mc_min":
-        user_input_state[user_id] = {"type": "mc_min"}
+        context.user_data["input_state"] = {"type": "mc_min"}
         await query.edit_message_text(
             "💰 **Custom Minimum Market Cap**\n\n"
             "Please enter minimum market cap in USD:\n"
@@ -669,7 +663,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_mc_max":
-        user_input_state[user_id] = {"type": "mc_max"}
+        context.user_data["input_state"] = {"type": "mc_max"}
         await query.edit_message_text(
             "💰 **Custom Maximum Market Cap**\n\n"
             "Please enter maximum market cap in USD:\n"
@@ -677,7 +671,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_liq_min":
-        user_input_state[user_id] = {"type": "liq_min"}
+        context.user_data["input_state"] = {"type": "liq_min"}
         await query.edit_message_text(
             "💧 **Custom Minimum Liquidity**\n\n"
             "Please enter minimum liquidity in USD:\n"
@@ -685,7 +679,7 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             parse_mode="Markdown"
         )
     elif data == "custom_liq_max":
-        user_input_state[user_id] = {"type": "liq_max"}
+        context.user_data["input_state"] = {"type": "liq_max"}
         await query.edit_message_text(
             "💧 **Custom Maximum Liquidity**\n\n"
             "Please enter maximum liquidity in USD:\n"
@@ -696,13 +690,12 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
 
 async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user text input for custom values"""
-    user_id = update.message.from_user.id
     
-    if user_id not in user_input_state:
+    if "input_state" not in context.user_data:
         # No state for this user, ignore the message
         return
     
-    state = user_input_state[user_id]
+    state = context.user_data["input_state"]
     input_type = state["type"]
     user_input = update.message.text.strip()
     
@@ -718,7 +711,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 return
             
             # Store time and ask for price
-            user_input_state[user_id] = {"type": "signal_price", "time_interval": time_interval}
+            context.user_data["input_state"] = {"type": "signal_price", "time_interval": time_interval}
             await update.message.reply_text(
                 f"✅ Time interval: {time_interval} minutes\n\n"
                 "📈 Now enter the price change percentage:\n"
@@ -752,7 +745,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             
             # Clear state
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "age_min":
             value = int(user_input)
@@ -768,7 +761,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Minimum pair age set to: {value} minutes\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "age_max":
             value = int(user_input)
@@ -784,7 +777,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum pair age set to: {value} minutes\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "mc_min":
             value = float(user_input)
@@ -800,7 +793,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Minimum market cap set to: ${value:,.0f}\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "mc_max":
             value = float(user_input)
@@ -816,7 +809,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum market cap set to: ${value:,.0f}\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "liq_min":
             value = float(user_input)
@@ -832,7 +825,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Minimum liquidity set to: ${value:,.0f}\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
         elif input_type == "liq_max":
             value = float(user_input)
@@ -848,7 +841,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum liquidity set to: ${value:,.0f}\n\n"
                 "Use /start to continue configuring."
             )
-            del user_input_state[user_id]
+            context.user_data.pop("input_state", None)
             
     except ValueError:
         await update.message.reply_text(
