@@ -2,16 +2,90 @@ import os
 import logging
 import asyncio
 import json
+import base64
+import base58
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
+from construct import Struct, Int64ul, Bytes, Padding
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Confirmed
+from solders.pubkey import Pubkey
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
+
+# Raydium V4 Liquidity Pool State Layout
+# This is the binary layout for Raydium AMM pool accounts
+# Based on Raydium's on-chain program structure
+LIQUIDITY_STATE_LAYOUT_V4 = Struct(
+    "status" / Int64ul,
+    "nonce" / Int64ul,
+    "maxOrder" / Int64ul,
+    "depth" / Int64ul,
+    "baseDecimal" / Int64ul,
+    "quoteDecimal" / Int64ul,
+    "state" / Int64ul,
+    "resetFlag" / Int64ul,
+    "minSize" / Int64ul,
+    "volMaxCutRatio" / Int64ul,
+    "amountWaveRatio" / Int64ul,
+    "baseLotSize" / Int64ul,
+    "quoteLotSize" / Int64ul,
+    "minPriceMultiplier" / Int64ul,
+    "maxPriceMultiplier" / Int64ul,
+    "systemDecimalValue" / Int64ul,
+    "minSeparateNumerator" / Int64ul,
+    "minSeparateDenominator" / Int64ul,
+    "tradeFeeNumerator" / Int64ul,
+    "tradeFeeDenominator" / Int64ul,
+    "pnlNumerator" / Int64ul,
+    "pnlDenominator" / Int64ul,
+    "swapFeeNumerator" / Int64ul,
+    "swapFeeDenominator" / Int64ul,
+    "baseNeedTakePnl" / Int64ul,
+    "quoteNeedTakePnl" / Int64ul,
+    "quoteTotalPnl" / Int64ul,
+    "baseTotalPnl" / Int64ul,
+    "poolOpenTime" / Int64ul,
+    "punishPcAmount" / Int64ul,
+    "punishCoinAmount" / Int64ul,
+    "orderbookToInitTime" / Int64ul,
+    "swapBaseInAmount" / Int64ul,
+    "swapQuoteOutAmount" / Int64ul,
+    "swapBase2QuoteFee" / Int64ul,
+    "swapQuoteInAmount" / Int64ul,
+    "swapBaseOutAmount" / Int64ul,
+    "swapQuote2BaseFee" / Int64ul,
+    # Base and quote vault addresses (32 bytes each)
+    "baseVault" / Bytes(32),
+    "quoteVault" / Bytes(32),
+    # Base and quote mint addresses (32 bytes each)
+    "baseMint" / Bytes(32),
+    "quoteMint" / Bytes(32),
+    "lpMint" / Bytes(32),
+    # OpenBook market info
+    "openOrders" / Bytes(32),
+    "marketId" / Bytes(32),
+    "marketProgramId" / Bytes(32),
+    "targetOrders" / Bytes(32),
+    "withdrawQueue" / Bytes(32),
+    "lpVault" / Bytes(32),
+    "owner" / Bytes(32),
+    # Padding for account alignment and future fields
+    # Total: (38 * 8) + (12 * 32) + 57 = 304 + 384 + 57 = 745 bytes
+    # This matches the Raydium V4 pool account structure
+    Padding(57),
+)
+
+# Minimum size check for pool data validation
+MIN_POOL_DATA_SIZE = LIQUIDITY_STATE_LAYOUT_V4.sizeof()
 
 # Configure logging
 logging.basicConfig(
@@ -23,11 +97,12 @@ logger = logging.getLogger(__name__)
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+RAYDIUM_V4_PROGRAM_ID = os.getenv("RAYDIUM_V4_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
 
 # Configuration constants
-DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/pairs/all"
-MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call
 CHECK_INTERVAL = 0.75  # Seconds between checks (1-2 times per second)
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call
 MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
 TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
 
@@ -63,72 +138,124 @@ class MemeCoinBot:
     def __init__(self):
         self.config = user_config.copy()
         self.session: Optional[aiohttp.ClientSession] = None
+        self.solana_client: Optional[AsyncClient] = None
         self.tracked_pairs = {}  # Track pairs for signal monitoring
         self.last_checked_pairs = set()  # Track pairs we've already alerted on
     
     async def start_session(self):
-        """Initialize aiohttp session"""
+        """Initialize aiohttp session and Solana client"""
         if not self.session:
             self.session = aiohttp.ClientSession()
+        if not self.solana_client:
+            self.solana_client = AsyncClient(SOLANA_RPC_URL)
     
     async def close_session(self):
-        """Close aiohttp session"""
+        """Close aiohttp session and Solana client"""
         if self.session:
             await self.session.close()
+        if self.solana_client:
+            await self.solana_client.close()
     
     async def fetch_new_coins(self) -> List[Dict]:
-        """Fetch new coins from DexScreener API"""
+        """Fetch new Raydium pools from Solana blockchain
+        
+        Note: This fetches program accounts from the Raydium V4 AMM program.
+        In production with high RPC usage, consider:
+        - Using a dedicated RPC provider (QuickNode, Alchemy, Helius, etc.)
+        - Implementing websocket subscriptions for real-time updates
+        - Adding memcmp filters to query specific pool states
+        - Implementing pagination for large result sets
+        - Caching results to reduce RPC calls
+        - Rate limiting to avoid hitting RPC endpoint limits
+        
+        For better performance, you could filter by:
+        - Pool creation time (memcmp on poolOpenTime field)
+        - Pool status (memcmp on status field)
+        - Specific token mints (memcmp on baseMint/quoteMint)
+        """
         await self.start_session()
         
         try:
-            async with self.session.get(DEXSCREENER_API_URL, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    pairs = data.get("pairs", [])
-                    return pairs[:MAX_PAIRS_FETCH]
-                else:
-                    logger.error(f"Failed to fetch coins: {response.status}")
-                    return []
+            # Get program accounts for Raydium V4 AMM
+            # This may return many accounts; we limit to MAX_PAIRS_FETCH
+            # TODO: Add filters here for production use to reduce data transfer
+            response = await self.solana_client.get_program_accounts(
+                Pubkey.from_string(RAYDIUM_V4_PROGRAM_ID),
+                commitment=Confirmed,
+                encoding="base64"
+            )
+            
+            pools = []
+            
+            if response.value:
+                for account_info in response.value[:MAX_PAIRS_FETCH]:
+                    try:
+                        # Decode the account data
+                        account_data = base64.b64decode(account_info.account.data[0])
+                        
+                        # Skip if data is too small for our layout
+                        if len(account_data) < MIN_POOL_DATA_SIZE:
+                            continue
+                        
+                        # Parse using our layout
+                        # Note: Construct will only parse the defined fields and ignore extra bytes
+                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
+                        
+                        # Convert to dict format
+                        pool = {
+                            "poolAddress": str(account_info.pubkey),
+                            "baseMint": base58.b58encode(pool_data.baseMint).decode('utf-8'),
+                            "quoteMint": base58.b58encode(pool_data.quoteMint).decode('utf-8'),
+                            "lpMint": base58.b58encode(pool_data.lpMint).decode('utf-8'),
+                            "baseVault": base58.b58encode(pool_data.baseVault).decode('utf-8'),
+                            "quoteVault": base58.b58encode(pool_data.quoteVault).decode('utf-8'),
+                            "marketId": base58.b58encode(pool_data.marketId).decode('utf-8'),
+                            "poolOpenTime": pool_data.poolOpenTime,
+                            "status": pool_data.status,
+                            "baseDecimal": pool_data.baseDecimal,
+                            "quoteDecimal": pool_data.quoteDecimal,
+                            "swapBaseInAmount": pool_data.swapBaseInAmount,
+                            "swapQuoteOutAmount": pool_data.swapQuoteOutAmount,
+                            "swapQuoteInAmount": pool_data.swapQuoteInAmount,
+                            "swapBaseOutAmount": pool_data.swapBaseOutAmount,
+                        }
+                        
+                        pools.append(pool)
+                        
+                    except Exception as e:
+                        logger.error(f"Error parsing pool account: {e}")
+                        continue
+            
+            return pools
+            
         except Exception as e:
-            logger.error(f"Error fetching coins: {e}")
+            logger.error(f"Error fetching pools from Solana: {e}")
             return []
     
-    def apply_filters(self, pair: Dict) -> bool:
-        """Apply user-defined filters to a pair"""
+    def apply_filters(self, pool: Dict) -> bool:
+        """Apply user-defined filters to a Raydium pool"""
         try:
-            # Network filter
-            if self.config["network"] != "all":
-                if pair.get("chainId", "").lower() != self.config["network"].lower():
-                    return False
+            # Network filter - Solana only for Raydium pools
+            if self.config["network"] != "all" and self.config["network"] != "solana":
+                return False
             
-            # Social links filter
-            social_info = pair.get("info", {})
-            if self.config["social_links"]["telegram"]:
-                if not social_info.get("socials", {}).get("telegram"):
-                    return False
-            if self.config["social_links"]["twitter"]:
-                if not social_info.get("socials", {}).get("twitter"):
-                    return False
-            if self.config["social_links"]["website"]:
-                if not social_info.get("websites"):
-                    return False
-            
-            # Pair age filter
-            pair_created = pair.get("pairCreatedAt")
-            if pair_created:
-                created_time = datetime.fromtimestamp(pair_created / 1000)
+            # Pool age filter - check when the pool was opened
+            pool_open_time = pool.get("poolOpenTime", 0)
+            if pool_open_time > 0:
+                # Convert Unix timestamp to datetime
+                created_time = datetime.fromtimestamp(pool_open_time)
                 age_minutes = (datetime.now() - created_time).total_seconds() / 60
+                
+                # Apply age filter
                 if not (self.config["pair_age_min"] <= age_minutes <= self.config["pair_age_max"]):
                     return False
             
-            # Market cap filter
-            fdv = pair.get("fdv", 0) or 0
-            if not (self.config["market_cap_min"] <= fdv <= self.config["market_cap_max"]):
-                return False
+            # For now, we don't have direct liquidity and market cap from on-chain data
+            # These would need to be fetched from additional sources or calculated
+            # We'll accept pools that pass the basic filters
             
-            # Liquidity filter
-            liquidity_usd = pair.get("liquidity", {}).get("usd", 0) or 0
-            if not (self.config["liquidity_min"] <= liquidity_usd <= self.config["liquidity_max"]):
+            # Check if pool is active (status should be > 0)
+            if pool.get("status", 0) == 0:
                 return False
             
             return True
@@ -136,26 +263,53 @@ class MemeCoinBot:
             logger.error(f"Error applying filters: {e}")
             return False
     
-    def format_coin_alert(self, pair: Dict) -> str:
-        """Format coin information for alert message"""
-        base_token = pair.get("baseToken", {})
-        quote_token = pair.get("quoteToken", {})
-        price_usd = pair.get("priceUsd", "N/A")
-        liquidity = pair.get("liquidity", {}).get("usd", 0)
-        fdv = pair.get("fdv", 0)
-        volume_24h = pair.get("volume", {}).get("h24", 0)
-        price_change_24h = pair.get("priceChange", {}).get("h24", 0)
+    def format_coin_alert(self, pool: Dict) -> str:
+        """Format Raydium pool information for alert message"""
+        pool_address = pool.get("poolAddress", "Unknown")
+        base_mint = pool.get("baseMint", "Unknown")
+        quote_mint = pool.get("quoteMint", "Unknown")
+        pool_open_time = pool.get("poolOpenTime", 0)
         
-        message = f"🚀 **New Meme Coin Alert!**\n\n"
-        message += f"**Token:** {base_token.get('name', 'Unknown')} ({base_token.get('symbol', 'N/A')})\n"
-        message += f"**Chain:** {pair.get('chainId', 'N/A')}\n"
-        message += f"**DEX:** {pair.get('dexId', 'N/A')}\n"
-        message += f"**Price:** ${price_usd}\n"
-        message += f"**Liquidity:** ${liquidity:,.2f}\n" if liquidity else "**Liquidity:** N/A\n"
-        message += f"**Market Cap:** ${fdv:,.2f}\n" if fdv else "**Market Cap:** N/A\n"
-        message += f"**24h Volume:** ${volume_24h:,.2f}\n" if volume_24h else "**24h Volume:** N/A\n"
-        message += f"**24h Change:** {price_change_24h:.2f}%\n" if price_change_24h else "**24h Change:** N/A\n"
-        message += f"\n**URL:** {pair.get('url', 'N/A')}\n"
+        # Format the open time
+        if pool_open_time > 0:
+            open_datetime = datetime.fromtimestamp(pool_open_time)
+            time_str = open_datetime.strftime("%Y-%m-%d %H:%M:%S UTC")
+            age_minutes = (datetime.now() - open_datetime).total_seconds() / 60
+            age_str = f"{age_minutes:.1f} minutes ago"
+        else:
+            time_str = "Unknown"
+            age_str = "Unknown"
+        
+        # Calculate approximate liquidity based on swap amounts
+        swap_base_in = pool.get("swapBaseInAmount", 0)
+        swap_quote_out = pool.get("swapQuoteOutAmount", 0)
+        swap_quote_in = pool.get("swapQuoteInAmount", 0)
+        swap_base_out = pool.get("swapBaseOutAmount", 0)
+        
+        message = f"🚀 **New Raydium Pool Detected!**\n\n"
+        message += f"**Pool Address:** `{pool_address}`\n"
+        message += f"**Chain:** Solana\n"
+        message += f"**DEX:** Raydium V4\n\n"
+        
+        message += f"**Base Token:** `{base_mint}`\n"
+        message += f"**Quote Token:** `{quote_mint}`\n\n"
+        
+        message += f"**Pool Opened:** {time_str}\n"
+        message += f"**Age:** {age_str}\n\n"
+        
+        message += f"**Status:** {'Active' if pool.get('status', 0) > 0 else 'Inactive'}\n"
+        
+        # Show swap statistics if available
+        if swap_base_in > 0 or swap_quote_in > 0:
+            message += f"\n**Trading Activity:**\n"
+            message += f"- Base In: {swap_base_in}\n"
+            message += f"- Quote Out: {swap_quote_out}\n"
+            message += f"- Quote In: {swap_quote_in}\n"
+            message += f"- Base Out: {swap_base_out}\n"
+        
+        # Add links
+        message += f"\n**Solscan:** https://solscan.io/account/{pool_address}\n"
+        message += f"**Base Token:** https://solscan.io/token/{base_mint}\n"
         
         return message
 
@@ -227,6 +381,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await set_liquidity(query, data)
     elif data.startswith("add_signal_"):
         await add_signal(query, data)
+    elif data.startswith("custom_"):
+        await handle_custom_button(query, context, data)
 
 
 async def show_config_menu(query) -> None:
@@ -321,6 +477,8 @@ async def config_age(query) -> None:
         [InlineKeyboardButton("0-30 min", callback_data="set_age_0_30")],
         [InlineKeyboardButton("0-1 hour", callback_data="set_age_0_60")],
         [InlineKeyboardButton("0-24 hours", callback_data="set_age_0_1440")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_age_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_age_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -329,7 +487,7 @@ async def config_age(query) -> None:
     current_max = bot_instance.config["pair_age_max"]
     
     await query.edit_message_text(
-        f"⏰ **Pair Age Filter**\n\nCurrent: {current_min}-{current_max} minutes\n\nSelect range:",
+        f"⏰ **Pair Age Filter**\n\nCurrent: {current_min}-{current_max} minutes\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -356,6 +514,8 @@ async def config_marketcap(query) -> None:
         [InlineKeyboardButton("$0 - $500K", callback_data="set_mc_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_mc_0_1000000")],
         [InlineKeyboardButton("$0 - $10M", callback_data="set_mc_0_10000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_mc_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_mc_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -364,7 +524,7 @@ async def config_marketcap(query) -> None:
     current_max = bot_instance.config["market_cap_max"]
     
     await query.edit_message_text(
-        f"💰 **Market Cap Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range:",
+        f"💰 **Market Cap Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -391,6 +551,8 @@ async def config_liquidity(query) -> None:
         [InlineKeyboardButton("$0 - $100K", callback_data="set_liq_0_100000")],
         [InlineKeyboardButton("$0 - $500K", callback_data="set_liq_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_liq_0_1000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_liq_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_liq_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -399,7 +561,7 @@ async def config_liquidity(query) -> None:
     current_max = bot_instance.config["liquidity_max"]
     
     await query.edit_message_text(
-        f"💧 **Liquidity Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range:",
+        f"💧 **Liquidity Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -425,6 +587,7 @@ async def config_signals(query) -> None:
         [InlineKeyboardButton("15 min / +20%", callback_data="add_signal_15_20")],
         [InlineKeyboardButton("30 min / +50%", callback_data="add_signal_30_50")],
         [InlineKeyboardButton("1 hour / +100%", callback_data="add_signal_60_100")],
+        [InlineKeyboardButton("✏️ Custom Signal", callback_data="custom_signal")],
         [InlineKeyboardButton("Clear All Signals", callback_data="add_signal_clear_0")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
@@ -461,6 +624,230 @@ async def add_signal(query, data: str) -> None:
             await query.answer("Signal already exists")
     
     await config_signals(query)
+
+
+async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Handle custom value button clicks"""
+    
+    if data == "custom_signal":
+        # Custom signal - need time AND price
+        context.user_data["input_state"] = {"type": "signal_time"}
+        await query.edit_message_text(
+            "📈 **Custom Signal**\n\n"
+            "Please enter the time interval in minutes:\n"
+            "Example: 10",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_age_min":
+        context.user_data["input_state"] = {"type": "age_min"}
+        await query.edit_message_text(
+            "⏰ **Custom Minimum Pair Age**\n\n"
+            "Please enter minimum age in minutes:\n"
+            "Example: 5",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_age_max":
+        context.user_data["input_state"] = {"type": "age_max"}
+        await query.edit_message_text(
+            "⏰ **Custom Maximum Pair Age**\n\n"
+            "Please enter maximum age in minutes:\n"
+            "Example: 60",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_mc_min":
+        context.user_data["input_state"] = {"type": "mc_min"}
+        await query.edit_message_text(
+            "💰 **Custom Minimum Market Cap**\n\n"
+            "Please enter minimum market cap in USD:\n"
+            "Example: 50000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_mc_max":
+        context.user_data["input_state"] = {"type": "mc_max"}
+        await query.edit_message_text(
+            "💰 **Custom Maximum Market Cap**\n\n"
+            "Please enter maximum market cap in USD:\n"
+            "Example: 1000000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_liq_min":
+        context.user_data["input_state"] = {"type": "liq_min"}
+        await query.edit_message_text(
+            "💧 **Custom Minimum Liquidity**\n\n"
+            "Please enter minimum liquidity in USD:\n"
+            "Example: 10000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_liq_max":
+        context.user_data["input_state"] = {"type": "liq_max"}
+        await query.edit_message_text(
+            "💧 **Custom Maximum Liquidity**\n\n"
+            "Please enter maximum liquidity in USD:\n"
+            "Example: 500000",
+            parse_mode="Markdown"
+        )
+
+
+async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle user text input for custom values"""
+    
+    if "input_state" not in context.user_data:
+        # No state for this user, ignore the message
+        return
+    
+    state = context.user_data["input_state"]
+    input_type = state["type"]
+    user_input = update.message.text.strip()
+    
+    try:
+        if input_type == "signal_time":
+            # First step: get time interval
+            time_interval = int(user_input)
+            if time_interval <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Time must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            # Store time and ask for price
+            context.user_data["input_state"] = {"type": "signal_price", "time_interval": time_interval}
+            await update.message.reply_text(
+                f"✅ Time interval: {time_interval} minutes\n\n"
+                "📈 Now enter the price change percentage:\n"
+                "Example: 50 (for +50%)",
+                parse_mode="Markdown"
+            )
+            
+        elif input_type == "signal_price":
+            # Second step: get price change
+            price_change = float(user_input)
+            if price_change <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Price change must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            time_interval = state["time_interval"]
+            signal = {"time_interval": time_interval, "price_change": price_change}
+            
+            if signal not in bot_instance.config["signals"]:
+                bot_instance.config["signals"].append(signal)
+                await update.message.reply_text(
+                    f"✅ Signal added: {time_interval} min / +{price_change}%\n\n"
+                    "Use /start to continue configuring."
+                )
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Signal already exists: {time_interval} min / +{price_change}%\n\n"
+                    "Use /start to continue."
+                )
+            
+            # Clear state
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "age_min":
+            value = int(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum age must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["pair_age_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum pair age set to: {value} minutes\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "age_max":
+            value = int(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum age must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["pair_age_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum pair age set to: {value} minutes\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "mc_min":
+            value = float(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum market cap must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["market_cap_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum market cap set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "mc_max":
+            value = float(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum market cap must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["market_cap_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum market cap set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "liq_min":
+            value = float(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum liquidity must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["liquidity_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum liquidity set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "liq_max":
+            value = float(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum liquidity must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["liquidity_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum liquidity set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            context.user_data.pop("input_state", None)
+            
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid input. Please enter a valid number.\n"
+            "Use /start to cancel and try again."
+        )
 
 
 async def view_config(query) -> None:
@@ -538,23 +925,23 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     while context.bot_data.get("monitoring", False):
         try:
-            # Fetch new coins
-            coins = await bot_instance.fetch_new_coins()
+            # Fetch new pools
+            pools = await bot_instance.fetch_new_coins()
             
-            for coin in coins:
-                pair_address = coin.get("pairAddress")
+            for pool in pools:
+                pool_address = pool.get("poolAddress")
                 
-                if not pair_address:
+                if not pool_address:
                     continue
                 
                 # Skip if already alerted
-                if pair_address in bot_instance.last_checked_pairs:
+                if pool_address in bot_instance.last_checked_pairs:
                     continue
                 
                 # Apply filters
-                if bot_instance.apply_filters(coin):
+                if bot_instance.apply_filters(pool):
                     # Send alert
-                    message = bot_instance.format_coin_alert(coin)
+                    message = bot_instance.format_coin_alert(pool)
                     
                     try:
                         if TELEGRAM_CHAT_ID:
@@ -563,26 +950,20 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 text=message,
                                 parse_mode="Markdown"
                             )
-                            logger.info(f"Alert sent for {coin.get('baseToken', {}).get('symbol', 'Unknown')}")
+                            logger.info(f"Alert sent for pool {pool_address}")
                             
-                            # Track for signals (safely handle price conversion)
+                            # Track for signals
                             if bot_instance.config["signals"]:
-                                price_usd = coin.get("priceUsd", "0")
-                                try:
-                                    initial_price = float(price_usd) if price_usd else 0.0
-                                except (ValueError, TypeError):
-                                    initial_price = 0.0
-                                
-                                bot_instance.tracked_pairs[pair_address] = {
-                                    "initial_price": initial_price,
+                                bot_instance.tracked_pairs[pool_address] = {
+                                    "initial_price": 0.0,  # Would need price oracle
                                     "timestamp": datetime.now(),
-                                    "symbol": coin.get("baseToken", {}).get("symbol", "Unknown")
+                                    "base_mint": pool.get("baseMint", "Unknown")
                                 }
                     except Exception as e:
                         logger.error(f"Error sending alert: {e}")
                     
                     # Mark as alerted
-                    bot_instance.last_checked_pairs.add(pair_address)
+                    bot_instance.last_checked_pairs.add(pool_address)
             
             # Clean up old tracked pairs (older than max signal time + buffer)
             max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
@@ -626,6 +1007,7 @@ def main() -> None:
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_input))
     
     # Start bot
     logger.info("Starting bot...")
