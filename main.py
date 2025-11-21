@@ -7,7 +7,7 @@ import base58
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
-from construct import Struct, Int64ul, Bytes, Flag, Padding
+from construct import Struct, Int64ul, Bytes, Padding
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from solders.pubkey import Pubkey
@@ -21,6 +21,7 @@ from telegram.ext import (
 
 # Raydium V4 Liquidity Pool State Layout
 # This is the binary layout for Raydium AMM pool accounts
+# Based on Raydium's on-chain program structure
 LIQUIDITY_STATE_LAYOUT_V4 = Struct(
     "status" / Int64ul,
     "nonce" / Int64ul,
@@ -75,9 +76,14 @@ LIQUIDITY_STATE_LAYOUT_V4 = Struct(
     "withdrawQueue" / Bytes(32),
     "lpVault" / Bytes(32),
     "owner" / Bytes(32),
-    # Additional padding to reach 752 bytes
+    # Padding for account alignment and future fields
+    # Total: (38 * 8) + (11 * 32) + 57 = 304 + 352 + 57 = 713 bytes
+    # This matches the typical Raydium V4 pool account structure
     Padding(57),
 )
+
+# Minimum size check for pool data validation
+MIN_POOL_DATA_SIZE = LIQUIDITY_STATE_LAYOUT_V4.sizeof()
 
 # Configure logging
 logging.basicConfig(
@@ -149,13 +155,20 @@ class MemeCoinBot:
             await self.solana_client.close()
     
     async def fetch_new_coins(self) -> List[Dict]:
-        """Fetch new Raydium pools from Solana blockchain"""
+        """Fetch new Raydium pools from Solana blockchain
+        
+        Note: This fetches program accounts from the Raydium V4 AMM program.
+        In production with high RPC usage, consider:
+        - Using a dedicated RPC provider (QuickNode, Alchemy, etc.)
+        - Implementing websocket subscriptions for real-time updates
+        - Adding filters by pool creation time or other criteria
+        - Implementing pagination for large result sets
+        """
         await self.start_session()
         
         try:
             # Get program accounts for Raydium V4 AMM
-            # Note: This fetches all program accounts, which might be a lot
-            # In production, you'd want to filter by specific criteria or use websockets
+            # This may return many accounts; we limit to MAX_PAIRS_FETCH
             response = await self.solana_client.get_program_accounts(
                 Pubkey.from_string(RAYDIUM_V4_PROGRAM_ID),
                 commitment=Confirmed,
@@ -171,11 +184,11 @@ class MemeCoinBot:
                         account_data = base64.b64decode(account_info.account.data[0])
                         
                         # Skip if data is too small for our layout
-                        if len(account_data) < 700:
+                        if len(account_data) < MIN_POOL_DATA_SIZE:
                             continue
                         
                         # Parse using our layout (only parse what we need)
-                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data[:LIQUIDITY_STATE_LAYOUT_V4.sizeof()])
+                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data[:MIN_POOL_DATA_SIZE])
                         
                         # Convert to dict format
                         pool = {
