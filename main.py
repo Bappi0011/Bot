@@ -10,7 +10,7 @@ import aiohttp
 from construct import Struct, Int64ul, Bytes, Flag, Padding
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
-from solana.publickey import PublicKey
+from solders.pubkey import Pubkey
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -75,8 +75,8 @@ LIQUIDITY_STATE_LAYOUT_V4 = Struct(
     "withdrawQueue" / Bytes(32),
     "lpVault" / Bytes(32),
     "owner" / Bytes(32),
-    # Additional padding for future fields
-    Padding(7),
+    # Additional padding to reach 752 bytes
+    Padding(57),
 )
 
 # Configure logging
@@ -154,11 +154,12 @@ class MemeCoinBot:
         
         try:
             # Get program accounts for Raydium V4 AMM
+            # Note: This fetches all program accounts, which might be a lot
+            # In production, you'd want to filter by specific criteria or use websockets
             response = await self.solana_client.get_program_accounts(
-                PublicKey(RAYDIUM_V4_PROGRAM_ID),
+                Pubkey.from_string(RAYDIUM_V4_PROGRAM_ID),
                 commitment=Confirmed,
-                encoding="base64",
-                data_size=752  # Size of Raydium V4 pool account
+                encoding="base64"
             )
             
             pools = []
@@ -169,8 +170,12 @@ class MemeCoinBot:
                         # Decode the account data
                         account_data = base64.b64decode(account_info.account.data[0])
                         
-                        # Parse using our layout
-                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
+                        # Skip if data is too small for our layout
+                        if len(account_data) < 700:
+                            continue
+                        
+                        # Parse using our layout (only parse what we need)
+                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data[:LIQUIDITY_STATE_LAYOUT_V4.sizeof()])
                         
                         # Convert to dict format
                         pool = {
