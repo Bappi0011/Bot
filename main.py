@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Configuration constants
+DEXSCREENER_API_URL = "https://api.dexscreener.com/latest/dex/pairs/all"
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call
+CHECK_INTERVAL = 0.75  # Seconds between checks (1-2 times per second)
+MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
+TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
+
 # Default configuration
 DEFAULT_CONFIG = {
     "api_source": "dexscreener",
@@ -48,8 +55,6 @@ DEFAULT_CONFIG = {
 
 # Global configuration
 user_config = DEFAULT_CONFIG.copy()
-tracked_pairs = {}  # Track pairs for signal monitoring
-last_checked_pairs = set()  # Track pairs we've already alerted on
 
 
 class MemeCoinBot:
@@ -58,6 +63,8 @@ class MemeCoinBot:
     def __init__(self):
         self.config = user_config.copy()
         self.session: Optional[aiohttp.ClientSession] = None
+        self.tracked_pairs = {}  # Track pairs for signal monitoring
+        self.last_checked_pairs = set()  # Track pairs we've already alerted on
     
     async def start_session(self):
         """Initialize aiohttp session"""
@@ -74,14 +81,11 @@ class MemeCoinBot:
         await self.start_session()
         
         try:
-            # DexScreener API endpoint for latest pairs
-            url = "https://api.dexscreener.com/latest/dex/pairs/all"
-            
-            async with self.session.get(url, timeout=10) as response:
+            async with self.session.get(DEXSCREENER_API_URL, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     pairs = data.get("pairs", [])
-                    return pairs[:100]  # Return top 100 latest pairs
+                    return pairs[:MAX_PAIRS_FETCH]
                 else:
                     logger.error(f"Failed to fetch coins: {response.status}")
                     return []
@@ -530,8 +534,6 @@ async def stop_monitoring(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background task to monitor new coins"""
-    global last_checked_pairs, tracked_pairs
-    
     logger.info("Starting coin monitoring...")
     
     while context.bot_data.get("monitoring", False):
@@ -546,7 +548,7 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                     continue
                 
                 # Skip if already alerted
-                if pair_address in last_checked_pairs:
+                if pair_address in bot_instance.last_checked_pairs:
                     continue
                 
                 # Apply filters
@@ -563,10 +565,16 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                             )
                             logger.info(f"Alert sent for {coin.get('baseToken', {}).get('symbol', 'Unknown')}")
                             
-                            # Track for signals
+                            # Track for signals (safely handle price conversion)
                             if bot_instance.config["signals"]:
-                                tracked_pairs[pair_address] = {
-                                    "initial_price": float(coin.get("priceUsd", 0)),
+                                price_usd = coin.get("priceUsd", "0")
+                                try:
+                                    initial_price = float(price_usd) if price_usd else 0.0
+                                except (ValueError, TypeError):
+                                    initial_price = 0.0
+                                
+                                bot_instance.tracked_pairs[pair_address] = {
+                                    "initial_price": initial_price,
                                     "timestamp": datetime.now(),
                                     "symbol": coin.get("baseToken", {}).get("symbol", "Unknown")
                                 }
@@ -574,22 +582,24 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                         logger.error(f"Error sending alert: {e}")
                     
                     # Mark as alerted
-                    last_checked_pairs.add(pair_address)
+                    bot_instance.last_checked_pairs.add(pair_address)
             
             # Clean up old tracked pairs (older than max signal time + buffer)
             max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
             cutoff_time = datetime.now() - timedelta(minutes=max_signal_time + 10)
-            tracked_pairs = {
-                k: v for k, v in tracked_pairs.items()
+            bot_instance.tracked_pairs = {
+                k: v for k, v in bot_instance.tracked_pairs.items()
                 if v["timestamp"] > cutoff_time
             }
             
             # Limit memory of checked pairs
-            if len(last_checked_pairs) > 1000:
-                last_checked_pairs = set(list(last_checked_pairs)[-500:])
+            if len(bot_instance.last_checked_pairs) > MAX_TRACKED_PAIRS:
+                bot_instance.last_checked_pairs = set(
+                    list(bot_instance.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
+                )
             
-            # Wait before next check (1-2 times per second means 0.5-1 second wait)
-            await asyncio.sleep(0.75)
+            # Wait before next check
+            await asyncio.sleep(CHECK_INTERVAL)
             
         except Exception as e:
             logger.error(f"Error in monitoring loop: {e}")
