@@ -16,6 +16,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
@@ -315,6 +317,10 @@ class MemeCoinBot:
 # Initialize bot instance
 bot_instance = MemeCoinBot()
 
+# Store user input state for custom values
+# Format: {user_id: {"type": "age_min"|"age_max"|"mc_min"|"mc_max"|"liq_min"|"liq_max"|"signal_time"|"signal_price"}}
+user_input_state = {}
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command"""
@@ -379,6 +385,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await set_liquidity(query, data)
     elif data.startswith("add_signal_"):
         await add_signal(query, data)
+    elif data.startswith("custom_"):
+        await handle_custom_button(query, context, data)
 
 
 async def show_config_menu(query) -> None:
@@ -473,6 +481,8 @@ async def config_age(query) -> None:
         [InlineKeyboardButton("0-30 min", callback_data="set_age_0_30")],
         [InlineKeyboardButton("0-1 hour", callback_data="set_age_0_60")],
         [InlineKeyboardButton("0-24 hours", callback_data="set_age_0_1440")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_age_min"), 
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_age_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -481,7 +491,7 @@ async def config_age(query) -> None:
     current_max = bot_instance.config["pair_age_max"]
     
     await query.edit_message_text(
-        f"⏰ **Pair Age Filter**\n\nCurrent: {current_min}-{current_max} minutes\n\nSelect range:",
+        f"⏰ **Pair Age Filter**\n\nCurrent: {current_min}-{current_max} minutes\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -508,6 +518,8 @@ async def config_marketcap(query) -> None:
         [InlineKeyboardButton("$0 - $500K", callback_data="set_mc_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_mc_0_1000000")],
         [InlineKeyboardButton("$0 - $10M", callback_data="set_mc_0_10000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_mc_min"), 
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_mc_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -516,7 +528,7 @@ async def config_marketcap(query) -> None:
     current_max = bot_instance.config["market_cap_max"]
     
     await query.edit_message_text(
-        f"💰 **Market Cap Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range:",
+        f"💰 **Market Cap Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -543,6 +555,8 @@ async def config_liquidity(query) -> None:
         [InlineKeyboardButton("$0 - $100K", callback_data="set_liq_0_100000")],
         [InlineKeyboardButton("$0 - $500K", callback_data="set_liq_0_500000")],
         [InlineKeyboardButton("$0 - $1M", callback_data="set_liq_0_1000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_liq_min"), 
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_liq_max")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -551,7 +565,7 @@ async def config_liquidity(query) -> None:
     current_max = bot_instance.config["liquidity_max"]
     
     await query.edit_message_text(
-        f"💧 **Liquidity Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range:",
+        f"💧 **Liquidity Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -577,6 +591,7 @@ async def config_signals(query) -> None:
         [InlineKeyboardButton("15 min / +20%", callback_data="add_signal_15_20")],
         [InlineKeyboardButton("30 min / +50%", callback_data="add_signal_30_50")],
         [InlineKeyboardButton("1 hour / +100%", callback_data="add_signal_60_100")],
+        [InlineKeyboardButton("✏️ Custom Signal", callback_data="custom_signal")],
         [InlineKeyboardButton("Clear All Signals", callback_data="add_signal_clear_0")],
         [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
     ]
@@ -613,6 +628,233 @@ async def add_signal(query, data: str) -> None:
             await query.answer("Signal already exists")
     
     await config_signals(query)
+
+
+async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """Handle custom value button clicks"""
+    user_id = query.from_user.id
+    parts = data.split("_")
+    
+    if data == "custom_signal":
+        # Custom signal - need time AND price
+        user_input_state[user_id] = {"type": "signal_time"}
+        await query.edit_message_text(
+            "📈 **Custom Signal**\n\n"
+            "Please enter the time interval in minutes:\n"
+            "Example: 10",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_age_min":
+        user_input_state[user_id] = {"type": "age_min"}
+        await query.edit_message_text(
+            "⏰ **Custom Minimum Pair Age**\n\n"
+            "Please enter minimum age in minutes:\n"
+            "Example: 5",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_age_max":
+        user_input_state[user_id] = {"type": "age_max"}
+        await query.edit_message_text(
+            "⏰ **Custom Maximum Pair Age**\n\n"
+            "Please enter maximum age in minutes:\n"
+            "Example: 60",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_mc_min":
+        user_input_state[user_id] = {"type": "mc_min"}
+        await query.edit_message_text(
+            "💰 **Custom Minimum Market Cap**\n\n"
+            "Please enter minimum market cap in USD:\n"
+            "Example: 50000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_mc_max":
+        user_input_state[user_id] = {"type": "mc_max"}
+        await query.edit_message_text(
+            "💰 **Custom Maximum Market Cap**\n\n"
+            "Please enter maximum market cap in USD:\n"
+            "Example: 1000000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_liq_min":
+        user_input_state[user_id] = {"type": "liq_min"}
+        await query.edit_message_text(
+            "💧 **Custom Minimum Liquidity**\n\n"
+            "Please enter minimum liquidity in USD:\n"
+            "Example: 10000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_liq_max":
+        user_input_state[user_id] = {"type": "liq_max"}
+        await query.edit_message_text(
+            "💧 **Custom Maximum Liquidity**\n\n"
+            "Please enter maximum liquidity in USD:\n"
+            "Example: 500000",
+            parse_mode="Markdown"
+        )
+
+
+async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle user text input for custom values"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in user_input_state:
+        # No state for this user, ignore the message
+        return
+    
+    state = user_input_state[user_id]
+    input_type = state["type"]
+    user_input = update.message.text.strip()
+    
+    try:
+        if input_type == "signal_time":
+            # First step: get time interval
+            time_interval = int(user_input)
+            if time_interval <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Time must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            # Store time and ask for price
+            user_input_state[user_id] = {"type": "signal_price", "time_interval": time_interval}
+            await update.message.reply_text(
+                f"✅ Time interval: {time_interval} minutes\n\n"
+                "📈 Now enter the price change percentage:\n"
+                "Example: 50 (for +50%)",
+                parse_mode="Markdown"
+            )
+            
+        elif input_type == "signal_price":
+            # Second step: get price change
+            price_change = float(user_input)
+            if price_change <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Price change must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            time_interval = state["time_interval"]
+            signal = {"time_interval": time_interval, "price_change": price_change}
+            
+            if signal not in bot_instance.config["signals"]:
+                bot_instance.config["signals"].append(signal)
+                await update.message.reply_text(
+                    f"✅ Signal added: {time_interval} min / +{price_change}%\n\n"
+                    "Use /start to continue configuring."
+                )
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Signal already exists: {time_interval} min / +{price_change}%\n\n"
+                    "Use /start to continue."
+                )
+            
+            # Clear state
+            del user_input_state[user_id]
+            
+        elif input_type == "age_min":
+            value = int(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum age must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["pair_age_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum pair age set to: {value} minutes\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+        elif input_type == "age_max":
+            value = int(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum age must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["pair_age_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum pair age set to: {value} minutes\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+        elif input_type == "mc_min":
+            value = float(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum market cap must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["market_cap_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum market cap set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+        elif input_type == "mc_max":
+            value = float(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum market cap must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["market_cap_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum market cap set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+        elif input_type == "liq_min":
+            value = float(user_input)
+            if value < 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Minimum liquidity must be 0 or greater.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["liquidity_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum liquidity set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+        elif input_type == "liq_max":
+            value = float(user_input)
+            if value <= 0:
+                await update.message.reply_text(
+                    "❌ Invalid value. Maximum liquidity must be greater than 0.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            bot_instance.config["liquidity_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum liquidity set to: ${value:,.0f}\n\n"
+                "Use /start to continue configuring."
+            )
+            del user_input_state[user_id]
+            
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid input. Please enter a valid number.\n"
+            "Use /start to cancel and try again."
+        )
 
 
 async def view_config(query) -> None:
@@ -772,6 +1014,7 @@ def main() -> None:
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_input))
     
     # Start bot
     logger.info("Starting bot...")
