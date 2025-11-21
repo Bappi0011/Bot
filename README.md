@@ -2,6 +2,14 @@
 
 A Telegram bot that monitors and alerts on newly launched meme coins with customizable filters and price change signals.
 
+## Quick Start
+
+1. Get a Telegram Bot Token from [@BotFather](https://t.me/BotFather)
+2. Get your Chat ID from [@userinfobot](https://t.me/userinfobot)
+3. Set environment variables `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+4. Run `python main.py`
+5. Open your bot on Telegram and send `/start`
+
 ## Features
 
 - 🚀 Real-time monitoring of new meme coin launches
@@ -42,6 +50,17 @@ pip install -r requirements.txt
 
 3. Set environment variables:
 ```bash
+# Copy the example environment file
+cp .env.example .env
+
+# Edit .env and add your tokens
+# TELEGRAM_BOT_TOKEN="your_bot_token_here"
+# TELEGRAM_CHAT_ID="your_chat_id_here"
+
+# On Linux/Mac, load the environment variables
+export $(cat .env | xargs)
+
+# Or set them directly
 export TELEGRAM_BOT_TOKEN="your_bot_token_here"
 export TELEGRAM_CHAT_ID="your_chat_id_here"
 ```
