@@ -160,14 +160,15 @@ class MemeCoinBot:
             await self.solana_client.close()
     
     async def fetch_new_coins(self) -> List[Dict]:
-        """Fetch new Raydium pools from Solana blockchain
+        """Fetch new Raydium pools from Solana blockchain using pagination
         
         Note: This fetches program accounts from the Raydium V4 AMM program.
+        Uses getProgramAccountsV2 with pagination to avoid rate limiting.
+        
         In production with high RPC usage, consider:
         - Using a dedicated RPC provider (QuickNode, Alchemy, Helius, etc.)
         - Implementing websocket subscriptions for real-time updates
         - Adding memcmp filters to query specific pool states
-        - Implementing pagination for large result sets
         - Caching results to reduce RPC calls
         - Rate limiting to avoid hitting RPC endpoint limits
         
@@ -179,56 +180,134 @@ class MemeCoinBot:
         await self.start_session()
         
         try:
-            # Get program accounts for Raydium V4 AMM
-            # This may return many accounts; we limit to MAX_PAIRS_FETCH
-            # TODO: Add filters here for production use to reduce data transfer
-            response = await self.solana_client.get_program_accounts(
-                Pubkey.from_string(RAYDIUM_V4_PROGRAM_ID),
-                commitment=Confirmed,
-                encoding="base64"
-            )
-            
             pools = []
+            page = 1
+            page_size = 1000  # Fetch in batches of 1000
+            should_continue = True  # Flag to control outer pagination loop
             
-            if response.value:
-                for account_info in response.value[:MAX_PAIRS_FETCH]:
-                    try:
-                        # Decode the account data
-                        account_data = base64.b64decode(account_info.account.data[0])
-                        
-                        # Skip if data is too small for our layout
-                        if len(account_data) < MIN_POOL_DATA_SIZE:
-                            continue
-                        
-                        # Parse using our layout
-                        # Note: Construct will only parse the defined fields and ignore extra bytes
-                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
-                        
-                        # Convert to dict format
-                        pool = {
-                            "poolAddress": str(account_info.pubkey),
-                            "baseMint": base58.b58encode(pool_data.baseMint).decode('utf-8'),
-                            "quoteMint": base58.b58encode(pool_data.quoteMint).decode('utf-8'),
-                            "lpMint": base58.b58encode(pool_data.lpMint).decode('utf-8'),
-                            "baseVault": base58.b58encode(pool_data.baseVault).decode('utf-8'),
-                            "quoteVault": base58.b58encode(pool_data.quoteVault).decode('utf-8'),
-                            "marketId": base58.b58encode(pool_data.marketId).decode('utf-8'),
-                            "poolOpenTime": pool_data.poolOpenTime,
-                            "status": pool_data.status,
-                            "baseDecimal": pool_data.baseDecimal,
-                            "quoteDecimal": pool_data.quoteDecimal,
-                            "swapBaseInAmount": pool_data.swapBaseInAmount,
-                            "swapQuoteOutAmount": pool_data.swapQuoteOutAmount,
-                            "swapQuoteInAmount": pool_data.swapQuoteInAmount,
-                            "swapBaseOutAmount": pool_data.swapBaseOutAmount,
+            # Fetch accounts using pagination
+            while len(pools) < MAX_PAIRS_FETCH and should_continue:
+                try:
+                    # Use getProgramAccountsV2 with pagination via custom RPC call
+                    # This is required by Helius RPC to avoid deprioritization
+                    params = {
+                        "programId": RAYDIUM_V4_PROGRAM_ID,
+                        "commitment": "confirmed",
+                        "encoding": "base64",
+                        "pagination": {
+                            "page": page,
+                            "limit": page_size
                         }
+                    }
+                    
+                    # Make custom RPC request using the provider
+                    # Note: Accessing _provider directly may break if library internals change
+                    # This is necessary as solana-py doesn't directly support getProgramAccountsV2
+                    try:
+                        response = await self.solana_client._provider.make_request(
+                            "getProgramAccountsV2",
+                            [params]
+                        )
+                    except AttributeError as e:
+                        logger.error(f"Unable to access _provider for custom RPC call: {e}. "
+                                   "This may indicate a breaking change in the solana-py library.")
+                        break
+                    
+                    # Check if we got a valid response
+                    if not response or "result" not in response:
+                        logger.warning(f"No result in response for page {page}. "
+                                     f"Response keys: {list(response.keys()) if response else 'None'}")
+                        break
+                    
+                    # Extract accounts from the response
+                    result = response["result"]
+                    
+                    # Handle different response formats
+                    if isinstance(result, dict) and "accounts" in result:
+                        accounts = result["accounts"]
+                    elif isinstance(result, list):
+                        accounts = result
+                    else:
+                        logger.warning(f"Unexpected result format: {type(result).__name__}. "
+                                     f"Result keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                        break
+                    
+                    # If no accounts returned, we've reached the end
+                    if not accounts:
+                        break
+                    
+                    # Process each account
+                    for account_info in accounts:
+                        # Stop if we've reached MAX_PAIRS_FETCH
+                        if len(pools) >= MAX_PAIRS_FETCH:
+                            should_continue = False
+                            break
                         
-                        pools.append(pool)
-                        
-                    except Exception as e:
-                        logger.error(f"Error parsing pool account: {e}")
-                        continue
+                        try:
+                            # Extract pubkey and account data from response
+                            # Response format: {"pubkey": "...", "account": {"data": [...], ...}}
+                            pubkey = account_info.get("pubkey")
+                            account = account_info.get("account")
+                            
+                            if not pubkey or not account:
+                                continue
+                            
+                            # Get the data field
+                            data = account.get("data")
+                            if not data:
+                                continue
+                            
+                            # Data is in [base64_string, encoding] format
+                            if isinstance(data, list) and len(data) > 0:
+                                account_data = base64.b64decode(data[0])
+                            else:
+                                continue
+                            
+                            # Skip if data is too small for our layout
+                            if len(account_data) < MIN_POOL_DATA_SIZE:
+                                continue
+                            
+                            # Parse using our layout
+                            # Note: Construct will only parse the defined fields and ignore extra bytes
+                            pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
+                            
+                            # Convert to dict format
+                            pool = {
+                                "poolAddress": pubkey,
+                                "baseMint": base58.b58encode(pool_data.baseMint).decode('utf-8'),
+                                "quoteMint": base58.b58encode(pool_data.quoteMint).decode('utf-8'),
+                                "lpMint": base58.b58encode(pool_data.lpMint).decode('utf-8'),
+                                "baseVault": base58.b58encode(pool_data.baseVault).decode('utf-8'),
+                                "quoteVault": base58.b58encode(pool_data.quoteVault).decode('utf-8'),
+                                "marketId": base58.b58encode(pool_data.marketId).decode('utf-8'),
+                                "poolOpenTime": pool_data.poolOpenTime,
+                                "status": pool_data.status,
+                                "baseDecimal": pool_data.baseDecimal,
+                                "quoteDecimal": pool_data.quoteDecimal,
+                                "swapBaseInAmount": pool_data.swapBaseInAmount,
+                                "swapQuoteOutAmount": pool_data.swapQuoteOutAmount,
+                                "swapQuoteInAmount": pool_data.swapQuoteInAmount,
+                                "swapBaseOutAmount": pool_data.swapBaseOutAmount,
+                            }
+                            
+                            pools.append(pool)
+                            
+                        except Exception as e:
+                            logger.error(f"Error parsing pool account: {e}")
+                            continue
+                    
+                    # If we got fewer accounts than page_size, we've reached the end
+                    if len(accounts) < page_size:
+                        break
+                    
+                    # Move to next page
+                    page += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error fetching page {page}: {e}")
+                    break
             
+            logger.info(f"Fetched {len(pools)} pools from Raydium V4 program")
             return pools
             
         except Exception as e:
