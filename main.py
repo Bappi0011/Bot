@@ -200,17 +200,35 @@ class MemeCoinBot:
                         }
                     }
                     
-                    # Make custom RPC request using the provider
-                    # Note: Accessing _provider directly may break if library internals change
-                    # This is necessary as solana-py doesn't directly support getProgramAccountsV2
+                    # Make custom RPC request using direct HTTP POST to the endpoint
+                    # This avoids reliance on internal library structures like _provider
+                    # which may change in library updates
                     try:
-                        response = await self.solana_client._provider.make_request(
-                            "getProgramAccountsV2",
-                            [params]
-                        )
-                    except AttributeError as e:
-                        logger.error(f"Unable to access _provider for custom RPC call: {e}. "
-                                   "This may indicate a breaking change in the solana-py library.")
+                        # Construct JSON-RPC payload manually
+                        payload = {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "getProgramAccountsV2",
+                            "params": [params]
+                        }
+                        
+                        # Make direct HTTP POST request using aiohttp
+                        async with self.session.post(SOLANA_RPC_URL, json=payload) as resp:
+                            # Check HTTP status before parsing
+                            if resp.status != 200:
+                                logger.error(f"HTTP error {resp.status} from RPC endpoint on page {page}")
+                                break
+                            
+                            response = await resp.json()
+                            
+                    except aiohttp.ClientError as e:
+                        logger.error(f"Network error making RPC call on page {page}: {e}")
+                        break
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON response from RPC endpoint on page {page}: {e}")
+                        break
+                    except Exception as e:
+                        logger.error(f"Unexpected error making RPC call on page {page}: {e}")
                         break
                     
                     # Check if we got a valid response
