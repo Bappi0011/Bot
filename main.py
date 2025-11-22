@@ -5,7 +5,7 @@ import json
 import base64
 import base58
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import aiohttp
 from construct import Struct, Int64ul, Bytes, Padding
@@ -264,21 +264,22 @@ class MemeCoinBot:
                                     alert_text += f"**Response Keys:** {response_keys}\n"
                                     alert_text += f"**Issue:** No 'result' key in response\n"
                                 
-                                alert_text += f"\n**Timestamp:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                alert_text += f"\n**Timestamp:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
                                 
                                 # Send the alert
                                 telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                                payload = {
+                                telegram_payload = {
                                     "chat_id": TELEGRAM_CHAT_ID,
                                     "text": alert_text,
                                     "parse_mode": "Markdown"
                                 }
                                 
-                                async with self.session.post(telegram_url, json=payload) as telegram_resp:
+                                async with self.session.post(telegram_url, json=telegram_payload) as telegram_resp:
                                     if telegram_resp.status == 200:
                                         logger.info("RPC failure alert sent to Telegram")
                                     else:
-                                        logger.warning(f"Failed to send Telegram alert: HTTP {telegram_resp.status}")
+                                        response_text = await telegram_resp.text()
+                                        logger.warning(f"Failed to send Telegram alert: HTTP {telegram_resp.status}, Response: {response_text}")
                                         
                             except Exception as telegram_error:
                                 logger.error(f"Error sending Telegram alert: {telegram_error}")
