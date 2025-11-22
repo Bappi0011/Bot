@@ -204,9 +204,6 @@ class MemeCoinBot:
                     # This avoids reliance on internal library structures like _provider
                     # which may change in library updates
                     try:
-                        # Get the RPC endpoint URL
-                        endpoint_url = self.solana_client._provider.endpoint_uri
-                        
                         # Construct JSON-RPC payload manually
                         payload = {
                             "jsonrpc": "2.0",
@@ -216,12 +213,22 @@ class MemeCoinBot:
                         }
                         
                         # Make direct HTTP POST request using aiohttp
-                        async with self.session.post(endpoint_url, json=payload) as resp:
+                        async with self.session.post(SOLANA_RPC_URL, json=payload) as resp:
+                            # Check HTTP status before parsing
+                            if resp.status != 200:
+                                logger.error(f"HTTP error {resp.status} from RPC endpoint on page {page}")
+                                break
+                            
                             response = await resp.json()
                             
+                    except aiohttp.ClientError as e:
+                        logger.error(f"Network error making RPC call on page {page}: {e}")
+                        break
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Invalid JSON response from RPC endpoint on page {page}: {e}")
+                        break
                     except Exception as e:
-                        logger.error(f"Error making custom RPC call: {e}. "
-                                   "Check your RPC endpoint configuration.")
+                        logger.error(f"Unexpected error making RPC call on page {page}: {e}")
                         break
                     
                     # Check if we got a valid response
