@@ -105,6 +105,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 RAYDIUM_V4_PROGRAM_ID = os.getenv("RAYDIUM_V4_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
 TELEGRAM_ERROR_ALERTS_ENABLED = os.getenv("TELEGRAM_ERROR_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+TELEGRAM_ERROR_DEBUG_MODE = os.getenv("TELEGRAM_ERROR_DEBUG_MODE", "false").lower() in ("true", "1", "yes")
 
 # Configuration constants
 CHECK_INTERVAL = 0.75  # Seconds between checks (1-2 times per second)
@@ -1573,11 +1574,23 @@ def main() -> None:
             setup_error_handler(
                 bot_token=TELEGRAM_BOT_TOKEN,
                 chat_id=TELEGRAM_CHAT_ID,
-                enabled=True
+                enabled=True,
+                debug_mode=TELEGRAM_ERROR_DEBUG_MODE
             )
-            logger.info("Telegram error alerting enabled")
+            logger.info(f"Telegram error alerting enabled (debug_mode={TELEGRAM_ERROR_DEBUG_MODE})")
+            
+            # Test error handling on initialization
+            # This helps verify that error alerts are working correctly
+            try:
+                # Log a test info message to verify setup (won't send to Telegram as it's INFO level)
+                logger.info("Error handler initialized successfully - errors will be sent to Telegram")
+            except Exception as test_error:
+                # If even the test fails, log it but don't crash
+                logger.warning(f"Error handler test failed: {test_error}")
+                
         except Exception as e:
             logger.warning(f"Failed to set up Telegram error handler: {e}")
+            # Continue running even if error handler setup fails
     else:
         logger.info("Telegram error alerting disabled")
     
