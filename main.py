@@ -132,6 +132,10 @@ DEFAULT_CONFIG = {
 # Global configuration
 user_config = DEFAULT_CONFIG.copy()
 
+# Presets storage - stores named configurations with tracking data
+user_presets = {}  # {preset_name: {"config": config_dict, "coins": {pool_address: coin_data}}}
+active_preset_name = None  # Currently active preset name
+
 
 class MemeCoinBot:
     """Main bot class for meme coin alerts"""
@@ -142,6 +146,8 @@ class MemeCoinBot:
         self.solana_client: Optional[AsyncClient] = None
         self.tracked_pairs = {}  # Track pairs for signal monitoring
         self.last_checked_pairs = set()  # Track pairs we've already alerted on
+        self.presets = user_presets  # Reference to global presets
+        self.active_preset = active_preset_name  # Currently active preset
     
     async def start_session(self):
         """Initialize aiohttp session and Solana client"""
@@ -324,17 +330,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("⚙️ Configure Filters", callback_data="config_main")],
         [InlineKeyboardButton("📊 View Current Config", callback_data="view_config")],
+        [InlineKeyboardButton("💾 Manage Presets", callback_data="presets_main")],
         [InlineKeyboardButton("🚀 Start Monitoring", callback_data="start_monitoring")],
         [InlineKeyboardButton("⏹️ Stop Monitoring", callback_data="stop_monitoring")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    preset_info = f" (Using preset: {bot_instance.active_preset})" if bot_instance.active_preset else ""
+    
     welcome_text = (
-        "🤖 **Welcome to Meme Coin Alert Bot!**\n\n"
+        f"🤖 **Welcome to Meme Coin Alert Bot!**{preset_info}\n\n"
         "This bot monitors new meme coin launches and sends alerts based on your filters.\n\n"
         "Use the buttons below to:\n"
         "- Configure your filters and alert settings\n"
         "- View your current configuration\n"
+        "- Manage configuration presets\n"
         "- Start/Stop monitoring for new coins\n"
     )
     
@@ -352,6 +362,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await show_config_menu(query)
     elif data == "view_config":
         await view_config(query)
+    elif data == "presets_main":
+        await show_presets_menu(query, context)
     elif data == "start_monitoring":
         await start_monitoring(query, context)
     elif data == "stop_monitoring":
@@ -382,6 +394,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await set_liquidity(query, data)
     elif data.startswith("add_signal_"):
         await add_signal(query, data)
+    elif data.startswith("preset_save"):
+        await save_preset_prompt(query, context)
+    elif data.startswith("preset_load_"):
+        preset_name = "_".join(data.split("_")[2:])
+        await load_preset(query, context, preset_name)
+    elif data.startswith("preset_delete_"):
+        preset_name = "_".join(data.split("_")[2:])
+        await delete_preset(query, context, preset_name)
+    elif data.startswith("preset_view_"):
+        preset_name = "_".join(data.split("_")[2:])
+        await view_preset_stats(query, context, preset_name)
+    elif data.startswith("preset_refresh_"):
+        preset_name = "_".join(data.split("_")[2:])
+        await refresh_preset_stats(query, context, preset_name)
     elif data.startswith("custom_"):
         await handle_custom_button(query, context, data)
 
@@ -701,7 +727,33 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_input = update.message.text.strip()
     
     try:
-        if input_type == "signal_time":
+        if input_type == "preset_name":
+            # Save current config as a named preset
+            preset_name = user_input
+            if not preset_name or len(preset_name) > 50:
+                await update.message.reply_text(
+                    "❌ Invalid preset name. Must be 1-50 characters.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            # Save the preset with current configuration
+            bot_instance.presets[preset_name] = {
+                "config": bot_instance.config.copy(),
+                "coins": {}  # Will track coins alerted under this preset
+            }
+            bot_instance.active_preset = preset_name
+            global active_preset_name
+            active_preset_name = preset_name
+            
+            await update.message.reply_text(
+                f"✅ Preset '{preset_name}' saved and activated!\n\n"
+                "This preset will now track all coins alerted while it's active.\n"
+                "Use /start to access the menu."
+            )
+            context.user_data.pop("input_state", None)
+            
+        elif input_type == "signal_time":
             # First step: get time interval
             time_interval = int(user_input)
             if time_interval <= 0:
@@ -737,12 +789,13 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 bot_instance.config["signals"].append(signal)
                 await update.message.reply_text(
                     f"✅ Signal added: {time_interval} min / +{price_change}%\n\n"
-                    "Use /start to continue configuring."
+                    "You can add more signals or use /start to access the menu.\n"
+                    "Multiple signals are supported!"
                 )
             else:
                 await update.message.reply_text(
                     f"⚠️ Signal already exists: {time_interval} min / +{price_change}%\n\n"
-                    "Use /start to continue."
+                    "Use /start to access the menu."
                 )
             
             # Clear state
@@ -760,7 +813,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["pair_age_min"] = value
             await update.message.reply_text(
                 f"✅ Minimum pair age set to: {value} minutes\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -776,7 +830,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["pair_age_max"] = value
             await update.message.reply_text(
                 f"✅ Maximum pair age set to: {value} minutes\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -792,7 +847,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["market_cap_min"] = value
             await update.message.reply_text(
                 f"✅ Minimum market cap set to: ${value:,.0f}\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -808,7 +864,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["market_cap_max"] = value
             await update.message.reply_text(
                 f"✅ Maximum market cap set to: ${value:,.0f}\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -824,7 +881,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["liquidity_min"] = value
             await update.message.reply_text(
                 f"✅ Minimum liquidity set to: ${value:,.0f}\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -840,7 +898,8 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             bot_instance.config["liquidity_max"] = value
             await update.message.reply_text(
                 f"✅ Maximum liquidity set to: ${value:,.0f}\n\n"
-                "Use /start to continue configuring."
+                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
+                "Use /start to access the menu."
             )
             context.user_data.pop("input_state", None)
             
@@ -878,18 +937,205 @@ async def view_config(query) -> None:
     await query.edit_message_text(config_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
+async def show_presets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show preset management menu"""
+    keyboard = []
+    
+    # Show existing presets with load and delete buttons
+    if bot_instance.presets:
+        for preset_name in bot_instance.presets.keys():
+            active_indicator = "✅ " if preset_name == bot_instance.active_preset else ""
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{active_indicator}{preset_name}",
+                    callback_data=f"preset_view_{preset_name}"
+                )
+            ])
+    
+    # Add save and back buttons
+    keyboard.append([InlineKeyboardButton("💾 Save Current as Preset", callback_data="preset_save")])
+    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_main")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    presets_text = f"📑 **Preset Management**\n\n"
+    if bot_instance.presets:
+        presets_text += f"You have {len(bot_instance.presets)} preset(s).\n"
+        if bot_instance.active_preset:
+            presets_text += f"Active: {bot_instance.active_preset}\n\n"
+        else:
+            presets_text += "No preset is currently active.\n\n"
+        presets_text += "Tap a preset to view stats, load, or delete it."
+    else:
+        presets_text += "No presets saved yet.\n\n"
+        presets_text += "Save your current configuration as a preset!"
+    
+    await query.edit_message_text(presets_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def save_preset_prompt(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt user to enter preset name"""
+    context.user_data["input_state"] = {"type": "preset_name"}
+    await query.edit_message_text(
+        "💾 **Save Preset**\n\n"
+        "Please enter a name for this preset:\n"
+        "Example: High Liquidity, Quick Flips, etc.\n\n"
+        "Use /start to cancel.",
+        parse_mode="Markdown"
+    )
+
+
+async def view_preset_stats(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
+    """View stats and options for a specific preset"""
+    if preset_name not in bot_instance.presets:
+        await query.answer("Preset not found!")
+        return
+    
+    preset_data = bot_instance.presets[preset_name]
+    coins = preset_data.get("coins", {})
+    
+    # Calculate win ratio
+    total_coins = len(coins)
+    if total_coins > 0:
+        wins = sum(1 for coin in coins.values() if coin.get("profit_percent", 0) > 0)
+        losses = sum(1 for coin in coins.values() if coin.get("profit_percent", 0) < 0)
+        neutral = total_coins - wins - losses
+        win_ratio = (wins / total_coins * 100) if total_coins > 0 else 0
+    else:
+        wins = losses = neutral = 0
+        win_ratio = 0
+    
+    stats_text = f"📊 **Preset: {preset_name}**\n\n"
+    stats_text += f"**Performance Stats:**\n"
+    stats_text += f"Total Coins: {total_coins}\n"
+    stats_text += f"Wins: {wins} ({win_ratio:.1f}%)\n"
+    stats_text += f"Losses: {losses}\n"
+    stats_text += f"Neutral: {neutral}\n\n"
+    
+    # Show config summary
+    config = preset_data.get("config", {})
+    stats_text += f"**Configuration:**\n"
+    stats_text += f"Network: {config.get('network', 'N/A')}\n"
+    stats_text += f"Age: {config.get('pair_age_min', 0)}-{config.get('pair_age_max', 0)} min\n"
+    stats_text += f"Signals: {len(config.get('signals', []))}\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Refresh Stats", callback_data=f"preset_refresh_{preset_name}")],
+        [InlineKeyboardButton("📋 Load This Preset", callback_data=f"preset_load_{preset_name}")],
+        [InlineKeyboardButton("🗑️ Delete Preset", callback_data=f"preset_delete_{preset_name}")],
+        [InlineKeyboardButton("◀️ Back to Presets", callback_data="presets_main")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def refresh_preset_stats(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
+    """Refresh stats for a preset by fetching current pool data"""
+    if preset_name not in bot_instance.presets:
+        await query.answer("Preset not found!")
+        return
+    
+    await query.answer("Refreshing stats... This may take a moment.")
+    
+    preset_data = bot_instance.presets[preset_name]
+    coins = preset_data.get("coins", {})
+    
+    if not coins:
+        await query.answer("No coins to refresh!")
+        await view_preset_stats(query, context, preset_name)
+        return
+    
+    # Fetch current pool data for tracked coins
+    try:
+        await bot_instance.start_session()
+        
+        for pool_address, coin_data in coins.items():
+            try:
+                # Fetch current pool state
+                pool_pubkey = Pubkey.from_string(pool_address)
+                account_info = await bot_instance.solana_client.get_account_info(pool_pubkey)
+                
+                if account_info.value and account_info.value.data:
+                    import base64
+                    account_data = base64.b64decode(account_info.value.data[0])
+                    
+                    if len(account_data) >= MIN_POOL_DATA_SIZE:
+                        pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
+                        
+                        # Calculate profit based on swap amounts change
+                        initial_base_in = coin_data.get("initial_swap_base_in", 1)
+                        current_base_in = pool_data.swapBaseInAmount
+                        
+                        if initial_base_in > 0:
+                            profit_percent = ((current_base_in - initial_base_in) / initial_base_in) * 100
+                            coin_data["profit_percent"] = profit_percent
+                            coin_data["current_swap_base_in"] = current_base_in
+                        
+            except Exception as e:
+                logger.error(f"Error refreshing pool {pool_address}: {e}")
+                continue
+        
+        # Show updated stats
+        await view_preset_stats(query, context, preset_name)
+        
+    except Exception as e:
+        logger.error(f"Error refreshing preset stats: {e}")
+        await query.answer("Error refreshing stats!")
+
+
+async def load_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
+    """Load a preset configuration"""
+    global active_preset_name
+    
+    if preset_name not in bot_instance.presets:
+        await query.answer("Preset not found!")
+        return
+    
+    # Load the configuration
+    preset_config = bot_instance.presets[preset_name].get("config", {})
+    bot_instance.config = preset_config.copy()
+    bot_instance.active_preset = preset_name
+    active_preset_name = preset_name
+    
+    await query.answer(f"Preset '{preset_name}' loaded!")
+    await show_presets_menu(query, context)
+
+
+async def delete_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
+    """Delete a preset"""
+    global active_preset_name
+    
+    if preset_name not in bot_instance.presets:
+        await query.answer("Preset not found!")
+        return
+    
+    del bot_instance.presets[preset_name]
+    
+    # Clear active preset if it was deleted
+    if bot_instance.active_preset == preset_name:
+        bot_instance.active_preset = None
+        active_preset_name = None
+    
+    await query.answer(f"Preset '{preset_name}' deleted!")
+    await show_presets_menu(query, context)
+
+
 async def back_to_main(query) -> None:
     """Go back to main menu"""
     keyboard = [
         [InlineKeyboardButton("⚙️ Configure Filters", callback_data="config_main")],
         [InlineKeyboardButton("📊 View Current Config", callback_data="view_config")],
+        [InlineKeyboardButton("💾 Manage Presets", callback_data="presets_main")],
         [InlineKeyboardButton("🚀 Start Monitoring", callback_data="start_monitoring")],
         [InlineKeyboardButton("⏹️ Stop Monitoring", callback_data="stop_monitoring")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    preset_info = f" (Using preset: {bot_instance.active_preset})" if bot_instance.active_preset else ""
+    
     await query.edit_message_text(
-        "🤖 **Meme Coin Alert Bot**\n\nSelect an option:",
+        f"🤖 **Meme Coin Alert Bot**{preset_info}\n\nSelect an option:",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -952,6 +1198,17 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 parse_mode="Markdown"
                             )
                             logger.info(f"Alert sent for pool {pool_address}")
+                            
+                            # Track coin in active preset
+                            if bot_instance.active_preset and bot_instance.active_preset in bot_instance.presets:
+                                bot_instance.presets[bot_instance.active_preset]["coins"][pool_address] = {
+                                    "base_mint": pool.get("baseMint", "Unknown"),
+                                    "quote_mint": pool.get("quoteMint", "Unknown"),
+                                    "initial_swap_base_in": pool.get("swapBaseInAmount", 0),
+                                    "initial_swap_quote_out": pool.get("swapQuoteOutAmount", 0),
+                                    "timestamp": datetime.now().isoformat(),
+                                    "profit_percent": 0  # Will be updated on refresh
+                                }
                             
                             # Track for signals
                             if bot_instance.config["signals"]:
