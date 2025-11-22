@@ -1578,15 +1578,7 @@ def main() -> None:
                 debug_mode=TELEGRAM_ERROR_DEBUG_MODE
             )
             logger.info(f"Telegram error alerting enabled (debug_mode={TELEGRAM_ERROR_DEBUG_MODE})")
-            
-            # Test error handling on initialization
-            # This helps verify that error alerts are working correctly
-            try:
-                # Log a test info message to verify setup (won't send to Telegram as it's INFO level)
-                logger.info("Error handler initialized successfully - errors will be sent to Telegram")
-            except Exception as test_error:
-                # If even the test fails, log it but don't crash
-                logger.warning(f"Error handler test failed: {test_error}")
+            logger.info("Error handler initialized - errors at ERROR level and above will be sent to Telegram")
                 
         except Exception as e:
             logger.warning(f"Failed to set up Telegram error handler: {e}")
