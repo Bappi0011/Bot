@@ -264,11 +264,13 @@ class MemeCoinBot:
 
                                 # Use the existing aiohttp session to send the alert
                                 telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                                await self.session.post(telegram_url, json={
+                                async with self.session.post(telegram_url, json={
                                     "chat_id": TELEGRAM_CHAT_ID,
                                     "text": alert_text,
                                     "parse_mode": "Markdown"
-                                })
+                                }) as tg_resp:
+                                    if tg_resp.status != 200:
+                                        logger.error(f"Failed to send Telegram alert. HTTP {tg_resp.status}")
                             except Exception as tg_err:
                                 logger.error(f"Failed to send Telegram error alert: {tg_err}")
 
