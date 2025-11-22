@@ -235,6 +235,43 @@ class MemeCoinBot:
                     if not response or "result" not in response:
                         logger.warning(f"No result in response for page {page}. "
                                      f"Response keys: {list(response.keys()) if response else 'None'}")
+                        
+                        # Send detailed error to Telegram if credentials exist
+                        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            try:
+                                error_details = ""
+                                if response and "error" in response:
+                                    err_obj = response["error"]
+                                    if isinstance(err_obj, dict):
+                                        code = err_obj.get('code', 'N/A')
+                                        msg = err_obj.get('message', 'Unknown Error')
+                                        data = err_obj.get('data', 'No details')
+                                        error_details = (
+                                            f"❌ **Code:** `{code}`\n"
+                                            f"💬 **Message:** `{msg}`\n"
+                                            f"📂 **Data:** `{data}`"
+                                        )
+                                    else:
+                                        error_details = f"❌ **Error:** `{str(err_obj)}`"
+                                else:
+                                    error_details = f"⚠️ **Unknown Response:** Keys found: `{list(response.keys()) if response else 'None'}`"
+
+                                alert_text = (
+                                    f"🚨 **RPC API Error Detected!**\n"
+                                    f"Page: `{page}`\n\n"
+                                    f"{error_details}"
+                                )
+
+                                # Use the existing aiohttp session to send the alert
+                                telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                                await self.session.post(telegram_url, json={
+                                    "chat_id": TELEGRAM_CHAT_ID,
+                                    "text": alert_text,
+                                    "parse_mode": "Markdown"
+                                })
+                            except Exception as tg_err:
+                                logger.error(f"Failed to send Telegram error alert: {tg_err}")
+
                         break
                     
                     # Extract accounts from the response
