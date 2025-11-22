@@ -69,8 +69,20 @@ class TelegramErrorHandler(logging.Handler):
             message = self.format_error_message(record)
             
             # Send to Telegram asynchronously
-            # We need to handle this carefully to avoid blocking
-            asyncio.create_task(self._send_error_async(message))
+            # Store the task reference to prevent garbage collection
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context, create a task
+                task = loop.create_task(self._send_error_async(message))
+                # Store task to prevent garbage collection
+                if not hasattr(self, '_pending_tasks'):
+                    self._pending_tasks = set()
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
+            except RuntimeError:
+                # No running loop, we'll need to handle this differently
+                # Store for later sending or skip
+                logging.warning("No event loop running to send error alert")
             
         except Exception as e:
             # Don't let error handler failures break the application
@@ -163,15 +175,18 @@ class TelegramErrorHandler(logging.Handler):
         # Use asyncio to send
         try:
             formatted_message = self.format_error_message(record)
-            # Run in the event loop if one exists, otherwise create one
+            # Check if we're in an async context
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self._send_error_async(formatted_message))
-                else:
-                    loop.run_until_complete(self._send_error_async(formatted_message))
+                loop = asyncio.get_running_loop()
+                # We're in an async context, create a task
+                task = loop.create_task(self._send_error_async(formatted_message))
+                # Store task to prevent garbage collection
+                if not hasattr(self, '_pending_tasks'):
+                    self._pending_tasks = set()
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
             except RuntimeError:
-                # No event loop, create a new one
+                # No event loop running, create a new one for this operation
                 asyncio.run(self._send_error_async(formatted_message))
         except Exception as e:
             logging.warning(f"Failed to send sync error to Telegram: {e}")

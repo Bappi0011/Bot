@@ -99,9 +99,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global error handler instance
-telegram_error_handler = None
-
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -1562,7 +1559,6 @@ async def post_init(application: Application) -> None:
 
 def main() -> None:
     """Start the bot"""
-    global telegram_error_handler
     
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
@@ -1574,7 +1570,7 @@ def main() -> None:
     # Set up Telegram error handler for logging
     if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         try:
-            telegram_error_handler = setup_error_handler(
+            setup_error_handler(
                 bot_token=TELEGRAM_BOT_TOKEN,
                 chat_id=TELEGRAM_CHAT_ID,
                 enabled=True
@@ -1593,20 +1589,8 @@ def main() -> None:
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
         
-        # Log the exception
+        # Log the exception - this will trigger the Telegram error handler
         logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
-        
-        # Send to Telegram if enabled
-        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            try:
-                asyncio.run(send_error_alert(
-                    TELEGRAM_BOT_TOKEN,
-                    TELEGRAM_CHAT_ID,
-                    f"Uncaught exception: {exc_type.__name__}: {exc_value}",
-                    exc_info=(exc_type, exc_value, exc_traceback)
-                ))
-            except Exception as e:
-                logger.error(f"Failed to send uncaught exception alert: {e}")
     
     sys.excepthook = handle_exception
     
@@ -1625,17 +1609,6 @@ def main() -> None:
     except Exception as e:
         error_msg = f"Fatal error in bot main loop: {e}"
         logger.critical(error_msg, exc_info=True)
-        # Send error alert to Telegram
-        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            try:
-                asyncio.run(send_error_alert(
-                    TELEGRAM_BOT_TOKEN,
-                    TELEGRAM_CHAT_ID,
-                    error_msg,
-                    exc_info=sys.exc_info()
-                ))
-            except Exception as alert_error:
-                logger.error(f"Failed to send fatal error alert: {alert_error}")
         raise
 
 
