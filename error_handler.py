@@ -69,15 +69,21 @@ class TelegramErrorHandler(logging.Handler):
                 # Try to get running loop (Python 3.10+)
                 try:
                     loop = asyncio.get_running_loop()
-                    # Loop is running, create a task
-                    asyncio.create_task(self._send_message(message))
+                    # Verify loop is actually running before creating task
+                    if loop.is_running():
+                        asyncio.create_task(self._send_message(message))
+                    else:
+                        # Loop exists but not running, run the coroutine directly
+                        loop.run_until_complete(self._send_message(message))
                 except RuntimeError:
-                    # No running loop, try to create and run
+                    # No running loop, create a new one
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                        loop.run_until_complete(self._send_message(message))
-                        loop.close()
+                        try:
+                            loop.run_until_complete(self._send_message(message))
+                        finally:
+                            loop.close()
                     except Exception:
                         # If all else fails, try the old method for compatibility
                         asyncio.run(self._send_message(message))
