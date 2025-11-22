@@ -4,6 +4,7 @@ import asyncio
 import json
 import base64
 import base58
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -979,12 +980,12 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                     list(bot_instance.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
                 )
             
-            # Wait before next check
-            await asyncio.sleep(CHECK_INTERVAL)
+            # Wait before next check - delay added to prevent 429 Too Many Requests error
+            await asyncio.sleep(10)
             
         except Exception as e:
             logger.error(f"Error in monitoring loop: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
 
 
 async def post_init(application: Application) -> None:
