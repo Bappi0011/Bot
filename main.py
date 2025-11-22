@@ -885,9 +885,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["pair_age_min"] = value
             await update.message.reply_text(
-                f"✅ Minimum pair age set to: {value} minutes\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Minimum pair age set to: {value} minutes"
             )
             context.user_data.pop("input_state", None)
             
@@ -902,9 +900,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["pair_age_max"] = value
             await update.message.reply_text(
-                f"✅ Maximum pair age set to: {value} minutes\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Maximum pair age set to: {value} minutes"
             )
             context.user_data.pop("input_state", None)
             
@@ -919,9 +915,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["market_cap_min"] = value
             await update.message.reply_text(
-                f"✅ Minimum market cap set to: ${value:,.0f}\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Minimum market cap set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
             
@@ -936,9 +930,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["market_cap_max"] = value
             await update.message.reply_text(
-                f"✅ Maximum market cap set to: ${value:,.0f}\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Maximum market cap set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
             
@@ -953,9 +945,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["liquidity_min"] = value
             await update.message.reply_text(
-                f"✅ Minimum liquidity set to: ${value:,.0f}\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Minimum liquidity set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
             
@@ -970,9 +960,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             bot_instance.config["liquidity_max"] = value
             await update.message.reply_text(
-                f"✅ Maximum liquidity set to: ${value:,.0f}\n\n"
-                "Settings updated! If monitoring is active, the new filter will be applied automatically.\n"
-                "Use /start to access the menu."
+                f"✅ Maximum liquidity set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
             
