@@ -183,9 +183,10 @@ class MemeCoinBot:
             pools = []
             page = 1
             page_size = 1000  # Fetch in batches of 1000
+            should_continue = True  # Flag to control outer pagination loop
             
             # Fetch accounts using pagination
-            while len(pools) < MAX_PAIRS_FETCH:
+            while len(pools) < MAX_PAIRS_FETCH and should_continue:
                 try:
                     # Use getProgramAccountsV2 with pagination via custom RPC call
                     # This is required by Helius RPC to avoid deprioritization
@@ -200,10 +201,15 @@ class MemeCoinBot:
                     }
                     
                     # Make custom RPC request using the provider
-                    response = await self.solana_client._provider.make_request(
-                        "getProgramAccountsV2",
-                        [params]
-                    )
+                    # Note: Accessing _provider directly may break if library internals change
+                    try:
+                        response = await self.solana_client._provider.make_request(
+                            "getProgramAccountsV2",
+                            [params]
+                        )
+                    except AttributeError as e:
+                        logger.error(f"Unable to access _provider for custom RPC call: {e}")
+                        break
                     
                     # Check if we got a valid response
                     if not response or "result" not in response:
@@ -230,6 +236,7 @@ class MemeCoinBot:
                     for account_info in accounts:
                         # Stop if we've reached MAX_PAIRS_FETCH
                         if len(pools) >= MAX_PAIRS_FETCH:
+                            should_continue = False
                             break
                         
                         try:
