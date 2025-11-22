@@ -5,6 +5,7 @@ import json
 import base64
 import base58
 import time
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -21,6 +22,9 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
+# Import error handler
+from error_handler import setup_error_handler, send_error_alert
 
 # Raydium V4 Liquidity Pool State Layout
 # This is the binary layout for Raydium AMM pool accounts
@@ -100,6 +104,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 RAYDIUM_V4_PROGRAM_ID = os.getenv("RAYDIUM_V4_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+TELEGRAM_ERROR_ALERTS_ENABLED = os.getenv("TELEGRAM_ERROR_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # Configuration constants
 CHECK_INTERVAL = 0.75  # Seconds between checks (1-2 times per second)
@@ -216,19 +221,52 @@ class MemeCoinBot:
                         async with self.session.post(SOLANA_RPC_URL, json=payload) as resp:
                             # Check HTTP status before parsing
                             if resp.status != 200:
-                                logger.error(f"HTTP error {resp.status} from RPC endpoint on page {page}")
+                                error_msg = f"HTTP error {resp.status} from RPC endpoint on page {page}"
+                                logger.error(error_msg)
+                                # Send error alert to Telegram
+                                if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                                    await send_error_alert(
+                                        TELEGRAM_BOT_TOKEN,
+                                        TELEGRAM_CHAT_ID,
+                                        f"RPC Error: {error_msg}"
+                                    )
                                 break
                             
                             response = await resp.json()
                             
                     except aiohttp.ClientError as e:
-                        logger.error(f"Network error making RPC call on page {page}: {e}")
+                        error_msg = f"Network error making RPC call on page {page}: {e}"
+                        logger.error(error_msg, exc_info=True)
+                        # Send error alert to Telegram
+                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await send_error_alert(
+                                TELEGRAM_BOT_TOKEN,
+                                TELEGRAM_CHAT_ID,
+                                error_msg,
+                                exc_info=sys.exc_info()
+                            )
                         break
                     except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON response from RPC endpoint on page {page}: {e}")
+                        error_msg = f"Invalid JSON response from RPC endpoint on page {page}: {e}"
+                        logger.error(error_msg, exc_info=True)
+                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await send_error_alert(
+                                TELEGRAM_BOT_TOKEN,
+                                TELEGRAM_CHAT_ID,
+                                error_msg,
+                                exc_info=sys.exc_info()
+                            )
                         break
                     except Exception as e:
-                        logger.error(f"Unexpected error making RPC call on page {page}: {e}")
+                        error_msg = f"Unexpected error making RPC call on page {page}: {e}"
+                        logger.error(error_msg, exc_info=True)
+                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await send_error_alert(
+                                TELEGRAM_BOT_TOKEN,
+                                TELEGRAM_CHAT_ID,
+                                error_msg,
+                                exc_info=sys.exc_info()
+                            )
                         break
                     
                     # Check if we got a valid response
@@ -322,14 +360,30 @@ class MemeCoinBot:
                     page += 1
                     
                 except Exception as e:
-                    logger.error(f"Error fetching page {page}: {e}")
+                    error_msg = f"Error fetching page {page}: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                        await send_error_alert(
+                            TELEGRAM_BOT_TOKEN,
+                            TELEGRAM_CHAT_ID,
+                            error_msg,
+                            exc_info=sys.exc_info()
+                        )
                     break
             
             logger.info(f"Fetched {len(pools)} pools from Raydium V4 program")
             return pools
             
         except Exception as e:
-            logger.error(f"Error fetching pools from Solana: {e}")
+            error_msg = f"Error fetching pools from Solana: {e}"
+            logger.error(error_msg, exc_info=True)
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
             return []
     
     def apply_filters(self, pool: Dict) -> bool:
@@ -1453,7 +1507,16 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     "base_mint": pool.get("baseMint", "Unknown")
                                 }
                     except Exception as e:
-                        logger.error(f"Error sending alert: {e}")
+                        error_msg = f"Error sending alert for pool {pool_address}: {e}"
+                        logger.error(error_msg, exc_info=True)
+                        # Send error alert to Telegram
+                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await send_error_alert(
+                                TELEGRAM_BOT_TOKEN,
+                                TELEGRAM_CHAT_ID,
+                                error_msg,
+                                exc_info=sys.exc_info()
+                            )
                     
                     # Mark as alerted
                     bot_instance.last_checked_pairs.add(pool_address)
@@ -1476,7 +1539,16 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.sleep(10)
             
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {e}")
+            error_msg = f"Error in monitoring loop: {e}"
+            logger.error(error_msg, exc_info=True)
+            # Send error alert to Telegram
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
             await asyncio.sleep(10)
 
 
@@ -1487,12 +1559,40 @@ async def post_init(application: Application) -> None:
 
 def main() -> None:
     """Start the bot"""
+    
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
         return
     
     if not TELEGRAM_CHAT_ID:
         logger.warning("TELEGRAM_CHAT_ID not set - alerts will not be sent to a specific chat")
+    
+    # Set up Telegram error handler for logging
+    if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            setup_error_handler(
+                bot_token=TELEGRAM_BOT_TOKEN,
+                chat_id=TELEGRAM_CHAT_ID,
+                enabled=True
+            )
+            logger.info("Telegram error alerting enabled")
+        except Exception as e:
+            logger.warning(f"Failed to set up Telegram error handler: {e}")
+    else:
+        logger.info("Telegram error alerting disabled")
+    
+    # Set up global exception handler
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        """Handle uncaught exceptions"""
+        if issubclass(exc_type, KeyboardInterrupt):
+            # Allow keyboard interrupt to exit
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        
+        # Log the exception - this will trigger the Telegram error handler
+        logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    
+    sys.excepthook = handle_exception
     
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
@@ -1504,7 +1604,12 @@ def main() -> None:
     
     # Start bot
     logger.info("Starting bot...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        error_msg = f"Fatal error in bot main loop: {e}"
+        logger.critical(error_msg, exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
