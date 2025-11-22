@@ -235,6 +235,54 @@ class MemeCoinBot:
                     if not response or "result" not in response:
                         logger.warning(f"No result in response for page {page}. "
                                      f"Response keys: {list(response.keys()) if response else 'None'}")
+                        
+                        # Send Telegram alert if credentials are available
+                        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            try:
+                                # Construct detailed error message
+                                alert_text = f"⚠️ **RPC Response Failure**\n\n"
+                                alert_text += f"**Page:** {page}\n"
+                                alert_text += f"**RPC URL:** `{SOLANA_RPC_URL}`\n\n"
+                                
+                                # Check if response contains an error
+                                if response and "error" in response:
+                                    error_obj = response["error"]
+                                    if isinstance(error_obj, dict):
+                                        error_code = error_obj.get("code", "N/A")
+                                        error_message = error_obj.get("message", "N/A")
+                                        error_data = error_obj.get("data", "N/A")
+                                        
+                                        alert_text += f"**Error Code:** `{error_code}`\n"
+                                        alert_text += f"**Error Message:** {error_message}\n"
+                                        if error_data != "N/A":
+                                            alert_text += f"**Error Data:** `{error_data}`\n"
+                                    else:
+                                        alert_text += f"**Error:** {error_obj}\n"
+                                else:
+                                    # No error key, report available keys
+                                    response_keys = list(response.keys()) if response else "None"
+                                    alert_text += f"**Response Keys:** {response_keys}\n"
+                                    alert_text += f"**Issue:** No 'result' key in response\n"
+                                
+                                alert_text += f"\n**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                
+                                # Send the alert
+                                telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                                payload = {
+                                    "chat_id": TELEGRAM_CHAT_ID,
+                                    "text": alert_text,
+                                    "parse_mode": "Markdown"
+                                }
+                                
+                                async with self.session.post(telegram_url, json=payload) as telegram_resp:
+                                    if telegram_resp.status == 200:
+                                        logger.info("RPC failure alert sent to Telegram")
+                                    else:
+                                        logger.warning(f"Failed to send Telegram alert: HTTP {telegram_resp.status}")
+                                        
+                            except Exception as telegram_error:
+                                logger.error(f"Error sending Telegram alert: {telegram_error}")
+                        
                         break
                     
                     # Extract accounts from the response
