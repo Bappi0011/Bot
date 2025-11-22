@@ -94,6 +94,7 @@ python main.py
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather | Yes | - |
 | `TELEGRAM_CHAT_ID` | Chat ID where alerts will be sent | Yes | - |
 | `TELEGRAM_ERROR_ALERTS_ENABLED` | Enable/disable error alerts to Telegram (true/false) | No | true |
+| `TELEGRAM_ERROR_DEBUG_MODE` | Enable debug mode for additional context in errors (true/false) | No | false |
 | `SOLANA_RPC_URL` | Solana RPC endpoint URL | No | https://api.mainnet-beta.solana.com |
 | `RAYDIUM_V4_PROGRAM_ID` | Raydium V4 AMM Program ID | No | 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 |
 
@@ -191,13 +192,18 @@ The bot includes a comprehensive error alerting system that automatically sends 
 
 - **Automatic Error Detection**: Captures all errors and exceptions that occur during bot execution
 - **Detailed Information**: Each error alert includes:
-  - Timestamp when the error occurred
-  - Error level (ERROR, CRITICAL)
+  - Timestamp when the error occurred (UTC timezone)
+  - Error level (ERROR, CRITICAL, etc.)
+  - Logger name (identifies which component logged the error)
   - Module and function where the error occurred
+  - Line number in the source code
   - Complete error message
-  - Full traceback for debugging
+  - Full traceback for debugging (automatically truncated if too long)
+- **Smart Truncation**: Messages longer than Telegram's 4096 character limit are automatically truncated with a clear indicator
+- **Debug Mode**: Optional debug mode to include additional context (variables, state) in error messages
 - **Configurable**: Enable or disable error alerting via environment variable
 - **Non-intrusive**: Error alerts don't interrupt normal bot operation
+- **Robust**: The error handler itself is designed to never crash the bot - if Telegram API fails, errors are logged to stderr instead
 
 ### Setup
 
@@ -210,6 +216,29 @@ export TELEGRAM_ERROR_ALERTS_ENABLED=true
 ```bash
 export TELEGRAM_ERROR_ALERTS_ENABLED=false
 ```
+
+3. **Enable Debug Mode** (for additional context in error messages):
+```bash
+export TELEGRAM_ERROR_DEBUG_MODE=true
+```
+
+**⚠️ Warning**: Debug mode may expose sensitive information (variable values, internal state) in error messages. Only enable in development or when actively debugging production issues.
+
+4. **Using Debug Context** (when debug mode is enabled):
+```python
+# Pass debug context with your log messages
+logger.error(
+    "Failed to process transaction",
+    exc_info=True,
+    extra={'debug_context': {
+        'user_id': user_id,
+        'transaction_amount': amount,
+        'account_balance': balance
+    }}
+)
+```
+
+When debug mode is enabled, this additional context will be included in the Telegram error alert.
 
 ### Error Alert Format
 
@@ -238,6 +267,11 @@ aiohttp.ClientError: Connection timeout
 ```
 ```
 
+If a traceback exceeds 4096 characters (Telegram's limit), it will be truncated with this indicator:
+```
+... (truncated due to length)
+```
+
 ### What Errors Are Captured?
 
 The system captures and reports:
@@ -247,17 +281,21 @@ The system captures and reports:
 3. **Telegram API Errors**: Message sending failures
 4. **Monitoring Loop Errors**: Issues in the coin monitoring process
 5. **Uncaught Exceptions**: Any unhandled exceptions that could crash the bot
+6. **All Logged Errors**: Any error logged through Python's logging framework at ERROR level or above
 
 ### Testing Error Alerts
 
 To test if error alerting is working:
 
 1. Start the bot with error alerts enabled
-2. The bot will log a message indicating error alerting status
-3. You can trigger a test error by:
+2. The bot will log a message indicating error alerting status on startup
+3. Monitor your Telegram chat for any errors that occur
+4. You can trigger a test error by:
    - Setting an invalid RPC URL
    - Using an invalid filter configuration
    - Any operation that would normally cause an error
+
+**Note**: The bot initialization includes automatic verification that the error handler is configured correctly. Check the console logs for confirmation.
 
 ### Configuration Example
 
@@ -270,6 +308,7 @@ TELEGRAM_CHAT_ID=123456789
 
 # Optional - Error Alerting
 TELEGRAM_ERROR_ALERTS_ENABLED=true
+TELEGRAM_ERROR_DEBUG_MODE=false
 
 # Optional - Solana Configuration
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
@@ -278,10 +317,12 @@ RAYDIUM_V4_PROGRAM_ID=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
 
 ### Best Practices
 
-1. **Keep Error Alerts Enabled**: They help you catch issues early
-2. **Monitor Regularly**: Check error alerts to identify patterns
-3. **Act on Errors**: Investigate and fix recurring errors
+1. **Keep Error Alerts Enabled**: They help you catch issues early in production
+2. **Monitor Regularly**: Check error alerts to identify patterns and recurring issues
+3. **Act on Errors**: Investigate and fix recurring errors promptly
 4. **Use a Dedicated Chat**: Consider using a separate chat for error alerts to avoid mixing with coin alerts
+5. **Debug Mode**: Only enable debug mode when actively troubleshooting - disable it in normal operation to avoid information overload
+6. **Review Logs**: Even with Telegram alerts, maintain access to server logs for detailed investigation
 
 ### Troubleshooting Error Alerts
 
