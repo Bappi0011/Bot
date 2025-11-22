@@ -200,17 +200,28 @@ class MemeCoinBot:
                         }
                     }
                     
-                    # Make custom RPC request using the provider
-                    # Note: Accessing _provider directly may break if library internals change
-                    # This is necessary as solana-py doesn't directly support getProgramAccountsV2
+                    # Make custom RPC request using direct HTTP POST to the endpoint
+                    # This avoids reliance on internal library structures like _provider
+                    # which may change in library updates
                     try:
-                        response = await self.solana_client._provider.make_request(
-                            "getProgramAccountsV2",
-                            [params]
-                        )
-                    except AttributeError as e:
-                        logger.error(f"Unable to access _provider for custom RPC call: {e}. "
-                                   "This may indicate a breaking change in the solana-py library.")
+                        # Get the RPC endpoint URL
+                        endpoint_url = self.solana_client._provider.endpoint_uri
+                        
+                        # Construct JSON-RPC payload manually
+                        payload = {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "getProgramAccountsV2",
+                            "params": [params]
+                        }
+                        
+                        # Make direct HTTP POST request using aiohttp
+                        async with self.session.post(endpoint_url, json=payload) as resp:
+                            response = await resp.json()
+                            
+                    except Exception as e:
+                        logger.error(f"Error making custom RPC call: {e}. "
+                                   "Check your RPC endpoint configuration.")
                         break
                     
                     # Check if we got a valid response
