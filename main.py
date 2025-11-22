@@ -239,10 +239,13 @@ class MemeCoinBot:
                         # Send Telegram alert if credentials are available
                         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                             try:
+                                # Sanitize RPC URL to hide potential API keys
+                                sanitized_url = SOLANA_RPC_URL.split('?')[0] if '?' in SOLANA_RPC_URL else SOLANA_RPC_URL
+                                
                                 # Construct detailed error message
                                 alert_text = f"⚠️ **RPC Response Failure**\n\n"
                                 alert_text += f"**Page:** {page}\n"
-                                alert_text += f"**RPC URL:** `{SOLANA_RPC_URL}`\n\n"
+                                alert_text += f"**RPC URL:** `{sanitized_url}`\n\n"
                                 
                                 # Check if response contains an error
                                 if response and "error" in response:
@@ -259,7 +262,7 @@ class MemeCoinBot:
                                     else:
                                         alert_text += f"**Error:** {error_obj}\n"
                                 else:
-                                    # No error key, report available keys
+                                    # No error key, report available keys (keys only, not values)
                                     response_keys = list(response.keys()) if response else "None"
                                     alert_text += f"**Response Keys:** {response_keys}\n"
                                     alert_text += f"**Issue:** No 'result' key in response\n"
