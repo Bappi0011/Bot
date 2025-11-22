@@ -132,10 +132,6 @@ DEFAULT_CONFIG = {
 # Global configuration
 user_config = DEFAULT_CONFIG.copy()
 
-# Presets storage - stores named configurations with tracking data
-user_presets = {}  # {preset_name: {"config": config_dict, "coins": {pool_address: coin_data}}}
-active_preset_name = None  # Currently active preset name
-
 
 class MemeCoinBot:
     """Main bot class for meme coin alerts"""
@@ -146,8 +142,8 @@ class MemeCoinBot:
         self.solana_client: Optional[AsyncClient] = None
         self.tracked_pairs = {}  # Track pairs for signal monitoring
         self.last_checked_pairs = set()  # Track pairs we've already alerted on
-        self.presets = user_presets  # Reference to global presets
-        self.active_preset = active_preset_name  # Currently active preset
+        self.presets = {}  # Stores named configurations with tracking data
+        self.active_preset = None  # Currently active preset name
     
     async def start_session(self):
         """Initialize aiohttp session and Solana client"""
@@ -743,8 +739,6 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "coins": {}  # Will track coins alerted under this preset
             }
             bot_instance.active_preset = preset_name
-            global active_preset_name
-            active_preset_name = preset_name
             
             await update.message.reply_text(
                 f"✅ Preset '{preset_name}' saved and activated!\n\n"
@@ -1057,19 +1051,28 @@ async def refresh_preset_stats(query, context: ContextTypes.DEFAULT_TYPE, preset
                 account_info = await bot_instance.solana_client.get_account_info(pool_pubkey)
                 
                 if account_info.value and account_info.value.data:
-                    import base64
                     account_data = base64.b64decode(account_info.value.data[0])
                     
                     if len(account_data) >= MIN_POOL_DATA_SIZE:
                         pool_data = LIQUIDITY_STATE_LAYOUT_V4.parse(account_data)
                         
-                        # Calculate profit based on swap amounts change
-                        initial_base_in = coin_data.get("initial_swap_base_in", 1)
+                        # Calculate activity change based on swap amounts
+                        # Note: This is a proxy metric, not actual profit/loss
+                        initial_base_in = coin_data.get("initial_swap_base_in", 0)
                         current_base_in = pool_data.swapBaseInAmount
                         
                         if initial_base_in > 0:
-                            profit_percent = ((current_base_in - initial_base_in) / initial_base_in) * 100
-                            coin_data["profit_percent"] = profit_percent
+                            activity_change = ((current_base_in - initial_base_in) / initial_base_in) * 100
+                            # Simple heuristic: positive activity change = potential win
+                            coin_data["profit_percent"] = activity_change
+                            coin_data["current_swap_base_in"] = current_base_in
+                        elif current_base_in > initial_base_in:
+                            # New activity detected
+                            coin_data["profit_percent"] = 100  # Treat as potential win
+                            coin_data["current_swap_base_in"] = current_base_in
+                        else:
+                            # No change or initial data missing
+                            coin_data["profit_percent"] = 0
                             coin_data["current_swap_base_in"] = current_base_in
                         
             except Exception as e:
@@ -1086,8 +1089,6 @@ async def refresh_preset_stats(query, context: ContextTypes.DEFAULT_TYPE, preset
 
 async def load_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
     """Load a preset configuration"""
-    global active_preset_name
-    
     if preset_name not in bot_instance.presets:
         await query.answer("Preset not found!")
         return
@@ -1096,7 +1097,6 @@ async def load_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: st
     preset_config = bot_instance.presets[preset_name].get("config", {})
     bot_instance.config = preset_config.copy()
     bot_instance.active_preset = preset_name
-    active_preset_name = preset_name
     
     await query.answer(f"Preset '{preset_name}' loaded!")
     await show_presets_menu(query, context)
@@ -1104,8 +1104,6 @@ async def load_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: st
 
 async def delete_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: str) -> None:
     """Delete a preset"""
-    global active_preset_name
-    
     if preset_name not in bot_instance.presets:
         await query.answer("Preset not found!")
         return
@@ -1115,7 +1113,6 @@ async def delete_preset(query, context: ContextTypes.DEFAULT_TYPE, preset_name: 
     # Clear active preset if it was deleted
     if bot_instance.active_preset == preset_name:
         bot_instance.active_preset = None
-        active_preset_name = None
     
     await query.answer(f"Preset '{preset_name}' deleted!")
     await show_presets_menu(query, context)
