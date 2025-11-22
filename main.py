@@ -281,8 +281,7 @@ class MemeCoinBot:
                                     if telegram_resp.status == 200:
                                         logger.info("RPC failure alert sent to Telegram")
                                     else:
-                                        response_text = await telegram_resp.text()
-                                        logger.warning(f"Failed to send Telegram alert: HTTP {telegram_resp.status}, Response: {response_text}")
+                                        logger.warning(f"Failed to send Telegram alert: HTTP {telegram_resp.status}")
                                         
                             except Exception as telegram_error:
                                 logger.error(f"Error sending Telegram alert: {telegram_error}")
