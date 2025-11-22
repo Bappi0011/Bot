@@ -26,6 +26,7 @@ A Telegram bot that monitors and alerts on newly launched meme coins with custom
 - 🎯 Inline keyboard interface for easy configuration
 - 📊 Integration with DexScreener API
 - 🔄 Checks for new coins 1-2 times per second
+- 🚨 **Error Alerting System**: Automatically sends all errors and failures to Telegram with detailed information
 
 ## Prerequisites
 
@@ -56,6 +57,7 @@ cp .env.example .env
 # Edit .env and add your tokens
 # TELEGRAM_BOT_TOKEN="your_bot_token_here"
 # TELEGRAM_CHAT_ID="your_chat_id_here"
+# TELEGRAM_ERROR_ALERTS_ENABLED=true
 
 # On Linux/Mac, load the environment variables
 export $(cat .env | xargs)
@@ -63,6 +65,7 @@ export $(cat .env | xargs)
 # Or set them directly
 export TELEGRAM_BOT_TOKEN="your_bot_token_here"
 export TELEGRAM_CHAT_ID="your_chat_id_here"
+export TELEGRAM_ERROR_ALERTS_ENABLED=true
 ```
 
 4. Run the bot:
@@ -86,10 +89,13 @@ python main.py
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather | Yes |
-| `TELEGRAM_CHAT_ID` | Chat ID where alerts will be sent | Yes |
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather | Yes | - |
+| `TELEGRAM_CHAT_ID` | Chat ID where alerts will be sent | Yes | - |
+| `TELEGRAM_ERROR_ALERTS_ENABLED` | Enable/disable error alerts to Telegram (true/false) | No | true |
+| `SOLANA_RPC_URL` | Solana RPC endpoint URL | No | https://api.mainnet-beta.solana.com |
+| `RAYDIUM_V4_PROGRAM_ID` | Raydium V4 AMM Program ID | No | 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 |
 
 ## Usage
 
@@ -177,6 +183,124 @@ Each alert includes:
 
 The bot checks for new coins 1-2 times per second. Please be aware of DexScreener API rate limits. The bot includes error handling for API failures.
 
+## 🚨 Error Alerting System
+
+The bot includes a comprehensive error alerting system that automatically sends detailed error information to your Telegram chat. This feature helps you monitor the bot's health and quickly identify issues without manually checking logs.
+
+### Features
+
+- **Automatic Error Detection**: Captures all errors and exceptions that occur during bot execution
+- **Detailed Information**: Each error alert includes:
+  - Timestamp when the error occurred
+  - Error level (ERROR, CRITICAL)
+  - Module and function where the error occurred
+  - Complete error message
+  - Full traceback for debugging
+- **Configurable**: Enable or disable error alerting via environment variable
+- **Non-intrusive**: Error alerts don't interrupt normal bot operation
+
+### Setup
+
+1. **Enable Error Alerts** (enabled by default):
+```bash
+export TELEGRAM_ERROR_ALERTS_ENABLED=true
+```
+
+2. **Disable Error Alerts** (if needed):
+```bash
+export TELEGRAM_ERROR_ALERTS_ENABLED=false
+```
+
+### Error Alert Format
+
+When an error occurs, you'll receive a message like this:
+
+```
+🚨 **ERROR ALERT** 🚨
+
+**Time:** 2025-11-22 19:10:04 UTC
+**Level:** ERROR
+**Logger:** __main__
+**Module:** main
+**Function:** fetch_new_coins
+**Line:** 245
+
+**Message:**
+Network error making RPC call on page 1: Connection timeout
+
+**Traceback:**
+```
+Traceback (most recent call last):
+  File "main.py", line 245, in fetch_new_coins
+    async with self.session.post(SOLANA_RPC_URL, json=payload) as resp:
+  ...
+aiohttp.ClientError: Connection timeout
+```
+```
+
+### What Errors Are Captured?
+
+The system captures and reports:
+
+1. **RPC/Network Errors**: Connection failures, timeouts, HTTP errors
+2. **Data Processing Errors**: JSON parsing errors, data validation failures
+3. **Telegram API Errors**: Message sending failures
+4. **Monitoring Loop Errors**: Issues in the coin monitoring process
+5. **Uncaught Exceptions**: Any unhandled exceptions that could crash the bot
+
+### Testing Error Alerts
+
+To test if error alerting is working:
+
+1. Start the bot with error alerts enabled
+2. The bot will log a message indicating error alerting status
+3. You can trigger a test error by:
+   - Setting an invalid RPC URL
+   - Using an invalid filter configuration
+   - Any operation that would normally cause an error
+
+### Configuration Example
+
+Complete `.env` configuration with error alerting:
+
+```bash
+# Required
+TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_CHAT_ID=123456789
+
+# Optional - Error Alerting
+TELEGRAM_ERROR_ALERTS_ENABLED=true
+
+# Optional - Solana Configuration
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+RAYDIUM_V4_PROGRAM_ID=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
+```
+
+### Best Practices
+
+1. **Keep Error Alerts Enabled**: They help you catch issues early
+2. **Monitor Regularly**: Check error alerts to identify patterns
+3. **Act on Errors**: Investigate and fix recurring errors
+4. **Use a Dedicated Chat**: Consider using a separate chat for error alerts to avoid mixing with coin alerts
+
+### Troubleshooting Error Alerts
+
+#### Not receiving error alerts?
+
+- Verify `TELEGRAM_ERROR_ALERTS_ENABLED=true` is set
+- Check that `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are correct
+- Ensure the bot has permission to send messages to the chat
+- Check the console logs for any warnings about error handler setup
+
+#### Too many error alerts?
+
+- This usually indicates an underlying issue that needs fixing
+- Check the error messages to identify the root cause
+- Common issues:
+  - Invalid RPC endpoint
+  - Network connectivity problems
+  - Rate limiting from APIs
+
 ## Troubleshooting
 
 ### Bot doesn't start
@@ -198,9 +322,11 @@ Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram to get yo
 ```
 Bot/
 ├── main.py           # Main bot application
+├── error_handler.py  # Telegram error alerting system
 ├── requirements.txt  # Python dependencies
 ├── Dockerfile       # Docker configuration for Railway
 ├── README.md        # This file
+├── .env.example     # Example environment variables
 └── .gitignore      # Git ignore patterns
 ```
 
