@@ -224,6 +224,22 @@ export TELEGRAM_ERROR_DEBUG_MODE=true
 
 **⚠️ Warning**: Debug mode may expose sensitive information (variable values, internal state) in error messages. Only enable in development or when actively debugging production issues.
 
+4. **Using Debug Context** (when debug mode is enabled):
+```python
+# Pass debug context with your log messages
+logger.error(
+    "Failed to process transaction",
+    exc_info=True,
+    extra={'debug_context': {
+        'user_id': user_id,
+        'transaction_amount': amount,
+        'account_balance': balance
+    }}
+)
+```
+
+When debug mode is enabled, this additional context will be included in the Telegram error alert.
+
 ### Error Alert Format
 
 When an error occurs, you'll receive a message like this:

@@ -9,7 +9,7 @@ import logging
 import traceback
 import sys
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 import aiohttp
 
@@ -48,7 +48,6 @@ class TelegramErrorHandler(logging.Handler):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.debug_mode = debug_mode
-        self.session: Optional[aiohttp.ClientSession] = None
         
     def emit(self, record: logging.LogRecord) -> None:
         """
@@ -67,16 +66,26 @@ class TelegramErrorHandler(logging.Handler):
             # Send to Telegram asynchronously
             # We need to run this in the event loop
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is running, create a task
+                # Try to get running loop (Python 3.10+)
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Loop is running, create a task
                     asyncio.create_task(self._send_message(message))
-                else:
-                    # If no loop is running, run it synchronously
-                    loop.run_until_complete(self._send_message(message))
-            except RuntimeError:
-                # No event loop available, try to create one
-                asyncio.run(self._send_message(message))
+                except RuntimeError:
+                    # No running loop, try to create and run
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self._send_message(message))
+                        loop.close()
+                    except Exception:
+                        # If all else fails, try the old method for compatibility
+                        asyncio.run(self._send_message(message))
+                        
+            except Exception as async_error:
+                # If async execution fails, log to stderr
+                print(f"Could not send error to Telegram asynchronously: {async_error}", 
+                      file=sys.stderr)
                 
         except Exception as e:
             # Prevent the error handler from crashing the application
@@ -95,7 +104,8 @@ class TelegramErrorHandler(logging.Handler):
             Formatted error message string
         """
         # Build the error message with detailed information
-        timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S UTC')
+        # Use UTC timezone for consistent timestamps
+        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
         
         message_parts = [
             "🚨 **ERROR ALERT** 🚨\n",
@@ -122,9 +132,17 @@ class TelegramErrorHandler(logging.Handler):
             message_parts.append("```")
         
         # Add debug information if debug mode is enabled
-        if self.debug_mode and hasattr(record, 'extra_context'):
+        # To use debug mode, pass extra={'debug_context': {...}} to logger calls
+        if self.debug_mode and hasattr(record, 'debug_context'):
             message_parts.append("\n**Debug Info:**")
-            message_parts.append(f"```\n{record.extra_context}\n```")
+            message_parts.append("```")
+            debug_info = getattr(record, 'debug_context', {})
+            if isinstance(debug_info, dict):
+                for key, value in debug_info.items():
+                    message_parts.append(f"{key}: {value}")
+            else:
+                message_parts.append(str(debug_info))
+            message_parts.append("```")
         
         # Join all parts
         full_message = "\n".join(message_parts)
@@ -147,10 +165,11 @@ class TelegramErrorHandler(logging.Handler):
         Args:
             message: The message to send
         """
+        # Use a temporary session to avoid resource leaks
+        # This ensures the session is always properly closed
+        session = None
         try:
-            # Create session if it doesn't exist
-            if not self.session:
-                self.session = aiohttp.ClientSession()
+            session = aiohttp.ClientSession()
             
             # Telegram API endpoint
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
@@ -163,7 +182,7 @@ class TelegramErrorHandler(logging.Handler):
             }
             
             # Send the request
-            async with self.session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     print(f"Failed to send error alert to Telegram: HTTP {response.status} - {error_text}", 
@@ -176,29 +195,15 @@ class TelegramErrorHandler(logging.Handler):
         except Exception as e:
             # Prevent any exception from crashing the application
             print(f"Unexpected error while sending error alert to Telegram: {e}", file=sys.stderr)
-    
-    async def close_async(self) -> None:
-        """Close the aiohttp session asynchronously."""
-        if self.session:
-            await self.session.close()
-            self.session = None
+        finally:
+            # Always close the session
+            if session:
+                await session.close()
     
     def close(self) -> None:
-        """Close the handler (synchronous wrapper)."""
-        # Close session synchronously if it exists
-        if self.session:
-            try:
-                # Try to close synchronously
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is running, schedule the close
-                    asyncio.create_task(self.close_async())
-                else:
-                    # If no loop is running, run it
-                    loop.run_until_complete(self.close_async())
-            except Exception:
-                # If async close fails, just clear the reference
-                self.session = None
+        """Close the handler."""
+        # No persistent session to close since we create temporary sessions per message
+        pass
 
 
 def setup_error_handler(
@@ -278,8 +283,8 @@ async def send_error_alert(
         extra_context: Optional dictionary with additional context
     """
     try:
-        # Build the message
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
+        # Build the message with UTC timestamp
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
         
         message_parts = [
             "🚨 **ERROR ALERT** 🚨\n",
