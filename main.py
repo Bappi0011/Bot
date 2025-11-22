@@ -202,18 +202,21 @@ class MemeCoinBot:
                     
                     # Make custom RPC request using the provider
                     # Note: Accessing _provider directly may break if library internals change
+                    # This is necessary as solana-py doesn't directly support getProgramAccountsV2
                     try:
                         response = await self.solana_client._provider.make_request(
                             "getProgramAccountsV2",
                             [params]
                         )
                     except AttributeError as e:
-                        logger.error(f"Unable to access _provider for custom RPC call: {e}")
+                        logger.error(f"Unable to access _provider for custom RPC call: {e}. "
+                                   "This may indicate a breaking change in the solana-py library.")
                         break
                     
                     # Check if we got a valid response
                     if not response or "result" not in response:
-                        logger.warning(f"No result in response for page {page}")
+                        logger.warning(f"No result in response for page {page}. "
+                                     f"Response keys: {list(response.keys()) if response else 'None'}")
                         break
                     
                     # Extract accounts from the response
@@ -225,7 +228,8 @@ class MemeCoinBot:
                     elif isinstance(result, list):
                         accounts = result
                     else:
-                        logger.warning(f"Unexpected result format: {type(result)}")
+                        logger.warning(f"Unexpected result format: {type(result).__name__}. "
+                                     f"Result keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
                         break
                     
                     # If no accounts returned, we've reached the end
