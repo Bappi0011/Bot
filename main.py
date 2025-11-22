@@ -264,7 +264,7 @@ class MemeCoinBot:
                                     alert_text += f"**Response Keys:** {response_keys}\n"
                                     alert_text += f"**Issue:** No 'result' key in response\n"
                                 
-                                alert_text += f"\n**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                alert_text += f"\n**Timestamp:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
                                 
                                 # Send the alert
                                 telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
