@@ -790,6 +790,139 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
         )
 
 
+async def send_liquidity_menu(update: Update) -> None:
+    """Send liquidity configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("$0 - $10K", callback_data="set_liq_0_10000")],
+        [InlineKeyboardButton("$0 - $50K", callback_data="set_liq_0_50000")],
+        [InlineKeyboardButton("$0 - $100K", callback_data="set_liq_0_100000")],
+        [InlineKeyboardButton("$0 - $500K", callback_data="set_liq_0_500000")],
+        [InlineKeyboardButton("$0 - $1M", callback_data="set_liq_0_1000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_liq_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_liq_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    current_min = bot_instance.config["liquidity_min"]
+    current_max = bot_instance.config["liquidity_max"]
+    
+    await update.message.reply_text(
+        f"💧 **Liquidity Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def send_age_menu(update: Update) -> None:
+    """Send age configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("0-5 min", callback_data="set_age_0_5")],
+        [InlineKeyboardButton("0-15 min", callback_data="set_age_0_15")],
+        [InlineKeyboardButton("0-30 min", callback_data="set_age_0_30")],
+        [InlineKeyboardButton("0-1 hour", callback_data="set_age_0_60")],
+        [InlineKeyboardButton("0-24 hours", callback_data="set_age_0_1440")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_age_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_age_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    current_min = bot_instance.config["pair_age_min"]
+    current_max = bot_instance.config["pair_age_max"]
+    
+    await update.message.reply_text(
+        f"⏰ **Pair Age Filter**\n\nCurrent: {current_min}-{current_max} minutes\n\nSelect range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def send_marketcap_menu(update: Update) -> None:
+    """Send market cap configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("$0 - $50K", callback_data="set_mc_0_50000")],
+        [InlineKeyboardButton("$0 - $100K", callback_data="set_mc_0_100000")],
+        [InlineKeyboardButton("$0 - $500K", callback_data="set_mc_0_500000")],
+        [InlineKeyboardButton("$0 - $1M", callback_data="set_mc_0_1000000")],
+        [InlineKeyboardButton("$0 - $10M", callback_data="set_mc_0_10000000")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_mc_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_mc_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    current_min = bot_instance.config["market_cap_min"]
+    current_max = bot_instance.config["market_cap_max"]
+    
+    await update.message.reply_text(
+        f"💰 **Market Cap Filter**\n\nCurrent: ${current_min:,} - ${current_max:,}\n\nSelect range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def send_signals_menu(update: Update) -> None:
+    """Send signals configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("5 min / +10%", callback_data="add_signal_5_10")],
+        [InlineKeyboardButton("15 min / +20%", callback_data="add_signal_15_20")],
+        [InlineKeyboardButton("30 min / +50%", callback_data="add_signal_30_50")],
+        [InlineKeyboardButton("1 hour / +100%", callback_data="add_signal_60_100")],
+        [InlineKeyboardButton("✏️ Custom Signal", callback_data="custom_signal")],
+        [InlineKeyboardButton("Clear All Signals", callback_data="add_signal_clear_0")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    signals_text = "\n".join([
+        f"- {s['time_interval']} min / +{s['price_change']}%"
+        for s in bot_instance.config["signals"]
+    ]) or "None"
+    
+    await update.message.reply_text(
+        f"📈 **Signal Settings**\n\nCurrent signals:\n{signals_text}\n\nAdd a signal:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def send_presets_menu(update: Update) -> None:
+    """Send presets management menu as a new message"""
+    keyboard = []
+    
+    # Show existing presets with load and delete buttons
+    if bot_instance.presets:
+        for preset_name in bot_instance.presets.keys():
+            active_indicator = "✅ " if preset_name == bot_instance.active_preset else ""
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{active_indicator}{preset_name}",
+                    callback_data=f"preset_view_{preset_name}"
+                )
+            ])
+    
+    # Add save and back buttons
+    keyboard.append([InlineKeyboardButton("💾 Save Current as Preset", callback_data="preset_save")])
+    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_main")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    presets_text = f"📑 **Preset Management**\n\n"
+    if bot_instance.presets:
+        presets_text += f"You have {len(bot_instance.presets)} preset(s).\n"
+        if bot_instance.active_preset:
+            presets_text += f"Active: {bot_instance.active_preset}\n\n"
+        else:
+            presets_text += "No preset is currently active.\n\n"
+        presets_text += "Tap a preset to view stats, load, or delete it."
+    else:
+        presets_text += "No presets saved yet.\n\n"
+        presets_text += "Save your current configuration as a preset!"
+    
+    await update.message.reply_text(presets_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
 async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user text input for custom values"""
     
@@ -821,10 +954,12 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             await update.message.reply_text(
                 f"✅ Preset '{preset_name}' saved and activated!\n\n"
-                "This preset will now track all coins alerted while it's active.\n"
-                "Use /start to access the menu."
+                "This preset will now track all coins alerted while it's active."
             )
             context.user_data.pop("input_state", None)
+            
+            # Send presets menu
+            await send_presets_menu(update)
             
         elif input_type == "signal_time":
             # First step: get time interval
@@ -861,18 +996,18 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             if signal not in bot_instance.config["signals"]:
                 bot_instance.config["signals"].append(signal)
                 await update.message.reply_text(
-                    f"✅ Signal added: {time_interval} min / +{price_change}%\n\n"
-                    "You can add more signals or use /start to access the menu.\n"
-                    "Multiple signals are supported!"
+                    f"✅ Signal added: {time_interval} min / +{price_change}%"
                 )
             else:
                 await update.message.reply_text(
-                    f"⚠️ Signal already exists: {time_interval} min / +{price_change}%\n\n"
-                    "Use /start to access the menu."
+                    f"⚠️ Signal already exists: {time_interval} min / +{price_change}%"
                 )
             
             # Clear state
             context.user_data.pop("input_state", None)
+            
+            # Send signals menu
+            await send_signals_menu(update)
             
         elif input_type == "age_min":
             value = int(user_input)
@@ -889,6 +1024,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop("input_state", None)
             
+            # Send age menu
+            await send_age_menu(update)
+            
         elif input_type == "age_max":
             value = int(user_input)
             if value <= 0:
@@ -903,6 +1041,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum pair age set to: {value} minutes"
             )
             context.user_data.pop("input_state", None)
+            
+            # Send age menu
+            await send_age_menu(update)
             
         elif input_type == "mc_min":
             value = float(user_input)
@@ -919,6 +1060,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop("input_state", None)
             
+            # Send market cap menu
+            await send_marketcap_menu(update)
+            
         elif input_type == "mc_max":
             value = float(user_input)
             if value <= 0:
@@ -933,6 +1077,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum market cap set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
+            
+            # Send market cap menu
+            await send_marketcap_menu(update)
             
         elif input_type == "liq_min":
             value = float(user_input)
@@ -949,6 +1096,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop("input_state", None)
             
+            # Send liquidity menu
+            await send_liquidity_menu(update)
+            
         elif input_type == "liq_max":
             value = float(user_input)
             if value <= 0:
@@ -963,6 +1113,9 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Maximum liquidity set to: ${value:,.0f}"
             )
             context.user_data.pop("input_state", None)
+            
+            # Send liquidity menu
+            await send_liquidity_menu(update)
             
     except ValueError:
         await update.message.reply_text(
