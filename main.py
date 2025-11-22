@@ -270,7 +270,8 @@ class MemeCoinBot:
                                     "parse_mode": "Markdown"
                                 }) as tg_resp:
                                     if tg_resp.status != 200:
-                                        logger.error(f"Failed to send Telegram alert. HTTP {tg_resp.status}")
+                                        error_text = await tg_resp.text()
+                                        logger.error(f"Failed to send Telegram alert. HTTP {tg_resp.status}: {error_text}")
                             except Exception as tg_err:
                                 logger.error(f"Failed to send Telegram error alert: {tg_err}")
 
