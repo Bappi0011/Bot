@@ -2661,21 +2661,27 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
             
             try:
                 async for message in bot_instance.ws_connection:
-                    # Check if monitoring should stop
-                    if not context.bot_data.get("monitoring", False):
-                        logger.info("Monitoring stopped by user")
-                        break
+                    try:
+                        # Check if monitoring should stop
+                        if not context.bot_data.get("monitoring", False):
+                            logger.info("Monitoring stopped by user")
+                            break
+                        
+                        # Process the incoming message
+                        await bot_instance.handle_websocket_message(message, telegram_bot=context.bot)
+                        
+                        # Clean up old tracked pairs periodically
+                        max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
+                        cutoff_time = datetime.now() - timedelta(minutes=max_signal_time + 10)
+                        bot_instance.tracked_pairs = {
+                            k: v for k, v in bot_instance.tracked_pairs.items()
+                            if v["timestamp"] > cutoff_time
+                        }
                     
-                    # Process the incoming message
-                    await bot_instance.handle_websocket_message(message, telegram_bot=context.bot)
-                    
-                    # Clean up old tracked pairs periodically
-                    max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
-                    cutoff_time = datetime.now() - timedelta(minutes=max_signal_time + 10)
-                    bot_instance.tracked_pairs = {
-                        k: v for k, v in bot_instance.tracked_pairs.items()
-                        if v["timestamp"] > cutoff_time
-                    }
+                    except Exception as msg_error:
+                        # Log error but continue processing other messages
+                        logger.error(f"Error processing WebSocket message: {msg_error}", exc_info=True)
+                        continue
                     
             except ConnectionClosed as e:
                 error_msg = f"WebSocket connection closed: {e}"
@@ -2769,47 +2775,53 @@ async def monitor_photon_tokens(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Process each token
             new_tokens_count = 0
             for token in tokens:
-                # Get token identifier (mint address)
-                mint = token.get("mint", token.get("address"))
+                try:
+                    # Get token identifier (mint address)
+                    mint = token.get("mint", token.get("address"))
+                    
+                    if not mint:
+                        continue
+                    
+                    # Skip if we've already alerted on this token
+                    if mint in bot_instance.photon_tokens:
+                        continue
+                    
+                    # Apply PhotonScan-specific filters
+                    if not bot_instance.apply_photon_filters(token):
+                        continue
+                    
+                    # Apply general filters (network, age, liquidity, etc.)
+                    # Note: We use a simplified check here since PhotonScan tokens
+                    # may have different data structure than Raydium pools
+                    
+                    # Send alert for new token
+                    await bot_instance.send_photon_alert(token, telegram_bot=context.bot)
+                    
+                    # Mark as seen
+                    bot_instance.photon_tokens.add(mint)
+                    new_tokens_count += 1
+                    
+                    # Track in preset if active
+                    if bot_instance.active_preset and bot_instance.active_preset in bot_instance.presets:
+                        preset_data = bot_instance.presets[bot_instance.active_preset]
+                        if "coins" in preset_data:
+                            preset_data["coins"][mint] = {
+                                "timestamp": datetime.now(),
+                                "name": token.get("name", "Unknown"),
+                                "symbol": token.get("symbol", "Unknown"),
+                                "source": "photon"
+                            }
+                    
+                    # Limit memory usage
+                    if len(bot_instance.photon_tokens) > MAX_TRACKED_PAIRS:
+                        # Remove oldest tokens (simple approach - could be improved)
+                        tokens_list = list(bot_instance.photon_tokens)
+                        bot_instance.photon_tokens = set(tokens_list[-TRACKED_PAIRS_TRIM_SIZE:])
                 
-                if not mint:
+                except Exception as e:
+                    # Log error but continue processing other tokens
+                    logger.error(f"Error processing PhotonScan token {token.get('mint', 'unknown')}: {e}", exc_info=True)
                     continue
-                
-                # Skip if we've already alerted on this token
-                if mint in bot_instance.photon_tokens:
-                    continue
-                
-                # Apply PhotonScan-specific filters
-                if not bot_instance.apply_photon_filters(token):
-                    continue
-                
-                # Apply general filters (network, age, liquidity, etc.)
-                # Note: We use a simplified check here since PhotonScan tokens
-                # may have different data structure than Raydium pools
-                
-                # Send alert for new token
-                await bot_instance.send_photon_alert(token, telegram_bot=context.bot)
-                
-                # Mark as seen
-                bot_instance.photon_tokens.add(mint)
-                new_tokens_count += 1
-                
-                # Track in preset if active
-                if bot_instance.active_preset and bot_instance.active_preset in bot_instance.presets:
-                    preset_data = bot_instance.presets[bot_instance.active_preset]
-                    if "coins" in preset_data:
-                        preset_data["coins"][mint] = {
-                            "timestamp": datetime.now(),
-                            "name": token.get("name", "Unknown"),
-                            "symbol": token.get("symbol", "Unknown"),
-                            "source": "photon"
-                        }
-                
-                # Limit memory usage
-                if len(bot_instance.photon_tokens) > MAX_TRACKED_PAIRS:
-                    # Remove oldest tokens (simple approach - could be improved)
-                    tokens_list = list(bot_instance.photon_tokens)
-                    bot_instance.photon_tokens = set(tokens_list[-TRACKED_PAIRS_TRIM_SIZE:])
             
             if new_tokens_count > 0:
                 logger.info(f"PhotonScan: Found and alerted {new_tokens_count} new tokens")
@@ -2846,6 +2858,23 @@ async def monitor_photon_tokens(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(application: Application) -> None:
     """Post initialization tasks"""
     application.bot_data["monitoring"] = False
+
+
+async def post_shutdown(application: Application) -> None:
+    """Post shutdown tasks - cleanup resources"""
+    try:
+        logger.info("Cleaning up resources...")
+        
+        # Stop monitoring if active
+        if application.bot_data.get("monitoring", False):
+            application.bot_data["monitoring"] = False
+        
+        # Close bot instance sessions
+        await bot_instance.close_session()
+        
+        logger.info("Cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}", exc_info=True)
 
 
 def main() -> None:
@@ -2890,7 +2919,13 @@ def main() -> None:
     sys.excepthook = handle_exception
     
     # Create application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -2901,10 +2936,14 @@ def main() -> None:
     logger.info("Starting bot...")
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         error_msg = f"Fatal error in bot main loop: {e}"
         logger.critical(error_msg, exc_info=True)
         raise
+    finally:
+        logger.info("Bot shutting down...")
 
 
 if __name__ == "__main__":
