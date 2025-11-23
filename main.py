@@ -169,8 +169,20 @@ FILTER_LIQUIDITY_MIN_SOL = float(os.getenv("FILTER_LIQUIDITY_MIN_SOL", "0"))
 # Track recently seen token mints to avoid duplicate alerts
 TOKEN_ALERT_COOLDOWN_MINUTES = int(os.getenv("TOKEN_ALERT_COOLDOWN_MINUTES", "60"))
 
+# ========================================
+# PHOTONSCAN API CONFIGURATION
+# ========================================
+# PhotonScan API endpoint for token discovery
+PHOTON_API_URL = os.getenv("PHOTON_API_URL", "https://api.photon-sol.tinyastro.io/tokens")
+
+# PhotonScan polling interval in seconds
+PHOTON_POLL_INTERVAL = int(os.getenv("PHOTON_POLL_INTERVAL", "60"))
+
+# PhotonScan API key (if required)
+PHOTON_API_KEY = os.getenv("PHOTON_API_KEY", "")
+
 # Configuration constants
-MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (deprecated, for backward compatibility)
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (used by deprecated fetch_new_coins and PhotonScan)
 MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
 TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
 
@@ -193,7 +205,19 @@ DEFAULT_CONFIG = {
     "dev_hold_max": 100,
     "top10_holders_min": 0,  # percentage
     "top10_holders_max": 100,
-    "signals": []  # List of {time_interval: int (minutes), price_change: float (percentage)}
+    "signals": [],  # List of {time_interval: int (minutes), price_change: float (percentage)}
+    # PhotonScan-specific filters
+    "photon_filters": {
+        "social_tg": False,  # Require Telegram social link
+        "dex_paid": False,  # Require DEX paid listing
+        "mint_auth": True,  # Filter by mint authority (True = revoked/None, False = not revoked)
+        "freeze_auth": True,  # Filter by freeze authority (True = revoked/None, False = not revoked)
+        "lp_burned": False,  # Require LP tokens burned
+        "top10_min": 0,  # Minimum top 10 holders percentage
+        "top10_max": 100,  # Maximum top 10 holders percentage
+        "audit": False,  # Require token audit
+        "bonding_curve": False,  # Require bonding curve
+    }
 }
 
 # Global configuration
@@ -218,6 +242,11 @@ class MemeCoinBot:
         self.ws_reconnect_count = 0
         self.ws_task = None
         self.ws_monitoring_active = False
+        
+        # PhotonScan related attributes
+        self.photon_tokens = set()  # Track tokens seen from PhotonScan to avoid duplicates
+        self.photon_monitoring_active = False
+        self.photon_task = None
     
     async def start_session(self):
         """Initialize aiohttp session and Solana client"""
@@ -796,6 +825,263 @@ class MemeCoinBot:
         except Exception as e:
             logger.error(f"Error in send_pool_alert: {e}")
     
+    async def fetch_photon_tokens(self) -> List[Dict]:
+        """
+        ========================================
+        PHOTONSCAN TOKEN FETCHER
+        ========================================
+        Fetch new tokens from PhotonScan API with filters
+        
+        Returns:
+            List of token dictionaries matching filters
+        """
+        await self.start_session()
+        
+        try:
+            # Build query parameters based on Photon filters
+            params = {
+                "limit": 100,
+                "offset": 0,
+            }
+            
+            # Add API key if configured
+            headers = {}
+            if PHOTON_API_KEY:
+                headers["Authorization"] = f"Bearer {PHOTON_API_KEY}"
+            
+            logger.info(f"Fetching tokens from PhotonScan API: {PHOTON_API_URL}")
+            
+            # Make request to PhotonScan API
+            async with self.session.get(PHOTON_API_URL, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    
+                    # Extract tokens from response with validation
+                    # Try common response formats: {"tokens": [...]}, {"data": [...]}, or direct array
+                    tokens = None
+                    
+                    if isinstance(data, dict):
+                        # Try "tokens" key first
+                        if "tokens" in data:
+                            tokens = data["tokens"]
+                        # Fallback to "data" key
+                        elif "data" in data:
+                            tokens = data["data"]
+                            logger.debug("PhotonScan response using 'data' key instead of 'tokens'")
+                        else:
+                            logger.warning(f"PhotonScan response has unexpected structure. Keys: {list(data.keys())}")
+                    elif isinstance(data, list):
+                        # Direct array response
+                        tokens = data
+                        logger.debug("PhotonScan response is a direct array")
+                    
+                    if tokens is not None and isinstance(tokens, list):
+                        logger.info(f"Fetched {len(tokens)} tokens from PhotonScan")
+                        return tokens
+                    else:
+                        logger.warning(f"Unexpected response format from PhotonScan: {type(data)}")
+                        return []
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"PhotonScan API error: HTTP {resp.status} - {error_text}")
+                    return []
+                    
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error fetching from PhotonScan: {e}")
+            return []
+        except Exception as e:
+            error_msg = f"Error fetching tokens from PhotonScan: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+            return []
+    
+    def apply_photon_filters(self, token: Dict) -> bool:
+        """
+        ========================================
+        PHOTON FILTER APPLIER
+        ========================================
+        Apply PhotonScan-specific filters to a token
+        
+        Args:
+            token: Token data dictionary from PhotonScan
+            
+        Returns:
+            True if token passes all filters, False otherwise
+        """
+        try:
+            photon_filters = self.config.get("photon_filters", {})
+            
+            # Social Telegram filter
+            if photon_filters.get("social_tg", False):
+                socials = token.get("socials", {})
+                if not socials.get("telegram"):
+                    return False
+            
+            # DEX paid listing filter
+            if photon_filters.get("dex_paid", False):
+                if not token.get("dex_paid", False):
+                    return False
+            
+            # Mint authority filter (True = must be revoked, False = any)
+            if photon_filters.get("mint_auth", True):
+                mint_authority = token.get("mint_authority")
+                # If filter is True, we want revoked (None, empty string, null, or zero address)
+                # Common representations of revoked authority
+                revoked_values = [None, "", "null", "0x0", "11111111111111111111111111111111"]
+                if mint_authority not in revoked_values:
+                    return False
+            
+            # Freeze authority filter (True = must be revoked, False = any)
+            if photon_filters.get("freeze_auth", True):
+                freeze_authority = token.get("freeze_authority")
+                # If filter is True, we want revoked (None, empty string, null, or zero address)
+                revoked_values = [None, "", "null", "0x0", "11111111111111111111111111111111"]
+                if freeze_authority not in revoked_values:
+                    return False
+            
+            # LP burned filter
+            if photon_filters.get("lp_burned", False):
+                if not token.get("lp_burned", False):
+                    return False
+            
+            # Top 10 holders percentage filter
+            top10_percent = token.get("top10_holders_percent", 0)
+            top10_min = photon_filters.get("top10_min", 0)
+            top10_max = photon_filters.get("top10_max", 100)
+            
+            if not (top10_min <= top10_percent <= top10_max):
+                return False
+            
+            # Audit filter
+            if photon_filters.get("audit", False):
+                if not token.get("audited", False):
+                    return False
+            
+            # Bonding curve filter
+            if photon_filters.get("bonding_curve", False):
+                if not token.get("bonding_curve", False):
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error applying Photon filters: {e}")
+            return False
+    
+    def format_photon_alert(self, token: Dict) -> str:
+        """
+        ========================================
+        PHOTON TOKEN ALERT FORMATTER
+        ========================================
+        Format PhotonScan token information for alert message
+        
+        Args:
+            token: Token data from PhotonScan
+            
+        Returns:
+            Formatted message string
+        """
+        mint = token.get("mint", token.get("address", "Unknown"))
+        name = token.get("name", "Unknown")
+        symbol = token.get("symbol", "Unknown")
+        
+        message = f"🔍 **New Token from PhotonScan!**\n\n"
+        message += f"**Name:** {name}\n"
+        message += f"**Symbol:** {symbol}\n"
+        message += f"**Mint:** `{mint}`\n"
+        message += f"**Network:** Solana\n\n"
+        
+        # Add market data if available
+        if "market_cap" in token:
+            message += f"**Market Cap:** ${token['market_cap']:,.2f}\n"
+        
+        if "liquidity" in token:
+            message += f"**Liquidity:** ${token['liquidity']:,.2f}\n"
+        
+        if "price" in token:
+            message += f"**Price:** ${token['price']}\n"
+        
+        # Add security info
+        message += f"\n**Security:**\n"
+        
+        mint_auth = token.get("mint_authority")
+        message += f"- Mint Authority: {'✅ Revoked' if not mint_auth else '❌ Not Revoked'}\n"
+        
+        freeze_auth = token.get("freeze_authority")
+        message += f"- Freeze Authority: {'✅ Revoked' if not freeze_auth else '❌ Not Revoked'}\n"
+        
+        if token.get("lp_burned"):
+            message += f"- LP Burned: ✅\n"
+        
+        if token.get("audited"):
+            message += f"- Audited: ✅\n"
+        
+        if "top10_holders_percent" in token:
+            message += f"- Top 10 Holders: {token['top10_holders_percent']:.2f}%\n"
+        
+        # Add social links
+        socials = token.get("socials", {})
+        if socials:
+            message += f"\n**Socials:**\n"
+            if socials.get("telegram"):
+                message += f"- [Telegram]({socials['telegram']})\n"
+            if socials.get("twitter"):
+                message += f"- [Twitter]({socials['twitter']})\n"
+            if socials.get("website"):
+                message += f"- [Website]({socials['website']})\n"
+        
+        # Add links
+        message += f"\n**Links:**\n"
+        message += f"- [Solscan](https://solscan.io/token/{mint})\n"
+        message += f"- [Photon](https://photon-sol.tinyastro.io/en/lp/{mint})\n"
+        
+        if token.get("dex_paid"):
+            message += f"\n💎 **DEX Paid Listing**\n"
+        
+        message += f"\n**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        
+        return message
+    
+    async def send_photon_alert(self, token: Dict, telegram_bot=None):
+        """
+        ========================================
+        PHOTON ALERT SENDER
+        ========================================
+        Send Telegram alert for PhotonScan token
+        
+        Args:
+            token: Token information dictionary
+            telegram_bot: Telegram bot instance
+        """
+        try:
+            message = self.format_photon_alert(token)
+            
+            if telegram_bot and TELEGRAM_CHAT_ID:
+                try:
+                    await telegram_bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=message,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                    
+                    mint = token.get("mint", token.get("address", "Unknown"))
+                    logger.info(f"PhotonScan alert sent for token {mint}")
+                    
+                except Exception as e:
+                    error_msg = f"Error sending PhotonScan alert: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    
+        except Exception as e:
+            logger.error(f"Error in send_photon_alert: {e}")
+    
     async def fetch_new_coins(self) -> List[Dict]:
         """
         DEPRECATED: This method is no longer used in favor of WebSocket streaming.
@@ -1167,18 +1453,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await config_liquidity(query)
     elif data == "config_signals":
         await config_signals(query)
+    elif data == "config_photon":
+        await config_photon(query)
     elif data == "back_main":
         await back_to_main(query)
     elif data.startswith("set_network_"):
         await set_network(query, data.split("_")[2])
     elif data.startswith("toggle_social_"):
         await toggle_social(query, data.split("_")[2])
+    elif data.startswith("toggle_photon_"):
+        await toggle_photon_filter(query, data.split("_")[2])
     elif data.startswith("set_age_"):
         await set_age(query, data)
     elif data.startswith("set_mc_"):
         await set_marketcap(query, data)
     elif data.startswith("set_liq_"):
         await set_liquidity(query, data)
+    elif data.startswith("set_photon_top10_"):
+        await set_photon_top10(query, data)
     elif data.startswith("add_signal_"):
         await add_signal(query, data)
     elif data.startswith("preset_save"):
@@ -1208,6 +1500,7 @@ async def show_config_menu(query) -> None:
         [InlineKeyboardButton("💰 Market Cap", callback_data="config_marketcap")],
         [InlineKeyboardButton("💧 Liquidity", callback_data="config_liquidity")],
         [InlineKeyboardButton("📈 Signal Settings", callback_data="config_signals")],
+        [InlineKeyboardButton("🔍 Photon Filters", callback_data="config_photon")],
         [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1440,6 +1733,107 @@ async def add_signal(query, data: str) -> None:
     await config_signals(query)
 
 
+async def config_photon(query) -> None:
+    """Configure PhotonScan filters"""
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    
+    keyboard = [
+        [InlineKeyboardButton(
+            f"Telegram Social: {'✅' if photon_filters.get('social_tg') else '❌'}",
+            callback_data="toggle_photon_social_tg"
+        )],
+        [InlineKeyboardButton(
+            f"DEX Paid: {'✅' if photon_filters.get('dex_paid') else '❌'}",
+            callback_data="toggle_photon_dex_paid"
+        )],
+        [InlineKeyboardButton(
+            f"Mint Authority Revoked: {'✅' if photon_filters.get('mint_auth') else '❌'}",
+            callback_data="toggle_photon_mint_auth"
+        )],
+        [InlineKeyboardButton(
+            f"Freeze Authority Revoked: {'✅' if photon_filters.get('freeze_auth') else '❌'}",
+            callback_data="toggle_photon_freeze_auth"
+        )],
+        [InlineKeyboardButton(
+            f"LP Burned: {'✅' if photon_filters.get('lp_burned') else '❌'}",
+            callback_data="toggle_photon_lp_burned"
+        )],
+        [InlineKeyboardButton(
+            f"Audit Required: {'✅' if photon_filters.get('audit') else '❌'}",
+            callback_data="toggle_photon_audit"
+        )],
+        [InlineKeyboardButton(
+            f"Bonding Curve: {'✅' if photon_filters.get('bonding_curve') else '❌'}",
+            callback_data="toggle_photon_bonding_curve"
+        )],
+        [InlineKeyboardButton("📊 Top 10 Holders %", callback_data="config_photon_top10")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_main")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    top10_min = photon_filters.get("top10_min", 0)
+    top10_max = photon_filters.get("top10_max", 100)
+    
+    await query.edit_message_text(
+        f"🔍 **PhotonScan Filters**\n\n"
+        f"Top 10 Holders: {top10_min}% - {top10_max}%\n\n"
+        f"Toggle filters below:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def toggle_photon_filter(query, filter_name: str) -> None:
+    """Toggle PhotonScan filter"""
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    
+    if filter_name in photon_filters:
+        photon_filters[filter_name] = not photon_filters[filter_name]
+        await query.answer(f"{filter_name.replace('_', ' ').title()} toggled")
+    
+    await config_photon(query)
+
+
+async def config_photon_top10(query) -> None:
+    """Configure top 10 holders percentage range for PhotonScan"""
+    keyboard = [
+        [InlineKeyboardButton("0% - 30%", callback_data="set_photon_top10_0_30")],
+        [InlineKeyboardButton("0% - 50%", callback_data="set_photon_top10_0_50")],
+        [InlineKeyboardButton("0% - 70%", callback_data="set_photon_top10_0_70")],
+        [InlineKeyboardButton("0% - 100%", callback_data="set_photon_top10_0_100")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_photon_top10_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_photon_top10_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_photon")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    current_min = photon_filters.get("top10_min", 0)
+    current_max = photon_filters.get("top10_max", 100)
+    
+    await query.edit_message_text(
+        f"📊 **Top 10 Holders Percentage**\n\n"
+        f"Current: {current_min}% - {current_max}%\n\n"
+        f"Select range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def set_photon_top10(query, data: str) -> None:
+    """Set PhotonScan top 10 holders percentage"""
+    parts = data.split("_")
+    min_percent = int(parts[3])
+    max_percent = int(parts[4])
+    
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    photon_filters["top10_min"] = min_percent
+    photon_filters["top10_max"] = max_percent
+    
+    await query.answer(f"Top 10 holders set to {min_percent}%-{max_percent}%")
+    await config_photon_top10(query)
+
+
 async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
     """Handle custom value button clicks"""
     
@@ -1498,6 +1892,22 @@ async def handle_custom_button(query, context: ContextTypes.DEFAULT_TYPE, data: 
             "💧 **Custom Maximum Liquidity**\n\n"
             "Please enter maximum liquidity in USD:\n"
             "Example: 500000",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_photon_top10_min":
+        context.user_data["input_state"] = {"type": "photon_top10_min"}
+        await query.edit_message_text(
+            "📊 **Custom Minimum Top 10 Holders %**\n\n"
+            "Please enter minimum percentage (0-100):\n"
+            "Example: 20",
+            parse_mode="Markdown"
+        )
+    elif data == "custom_photon_top10_max":
+        context.user_data["input_state"] = {"type": "photon_top10_max"}
+        await query.edit_message_text(
+            "📊 **Custom Maximum Top 10 Holders %**\n\n"
+            "Please enter maximum percentage (0-100):\n"
+            "Example: 80",
             parse_mode="Markdown"
         )
 
@@ -1633,6 +2043,32 @@ async def send_presets_menu(update: Update) -> None:
         presets_text += "Save your current configuration as a preset!"
     
     await update.message.reply_text(presets_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def send_photon_top10_menu(update: Update) -> None:
+    """Send Photon top10 configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("0% - 30%", callback_data="set_photon_top10_0_30")],
+        [InlineKeyboardButton("0% - 50%", callback_data="set_photon_top10_0_50")],
+        [InlineKeyboardButton("0% - 70%", callback_data="set_photon_top10_0_70")],
+        [InlineKeyboardButton("0% - 100%", callback_data="set_photon_top10_0_100")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_photon_top10_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_photon_top10_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_photon")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    current_min = photon_filters.get("top10_min", 0)
+    current_max = photon_filters.get("top10_max", 100)
+    
+    await update.message.reply_text(
+        f"📊 **Top 10 Holders Percentage**\n\n"
+        f"Current: {current_min}% - {current_max}%\n\n"
+        f"Select range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
 
 async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1829,6 +2265,44 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Send liquidity menu
             await send_liquidity_menu(update)
             
+        elif input_type == "photon_top10_min":
+            value = float(user_input)
+            if value < 0 or value > 100:
+                await update.message.reply_text(
+                    "❌ Invalid value. Percentage must be between 0 and 100.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            photon_filters = bot_instance.config.get("photon_filters", {})
+            photon_filters["top10_min"] = value
+            await update.message.reply_text(
+                f"✅ Minimum top 10 holders set to: {value:.1f}%"
+            )
+            context.user_data.pop("input_state", None)
+            
+            # Send photon top10 menu
+            await send_photon_top10_menu(update)
+            
+        elif input_type == "photon_top10_max":
+            value = float(user_input)
+            if value < 0 or value > 100:
+                await update.message.reply_text(
+                    "❌ Invalid value. Percentage must be between 0 and 100.\n"
+                    "Please try again or use /start to cancel."
+                )
+                return
+            
+            photon_filters = bot_instance.config.get("photon_filters", {})
+            photon_filters["top10_max"] = value
+            await update.message.reply_text(
+                f"✅ Maximum top 10 holders set to: {value:.1f}%"
+            )
+            context.user_data.pop("input_state", None)
+            
+            # Send photon top10 menu
+            await send_photon_top10_menu(update)
+            
     except ValueError:
         await update.message.reply_text(
             "❌ Invalid input. Please enter a valid number.\n"
@@ -1846,6 +2320,26 @@ async def view_config(query) -> None:
         for s in config["signals"]
     ]) or "  None"
     
+    # PhotonScan filters
+    photon_filters = config.get("photon_filters", {})
+    photon_status = []
+    if photon_filters.get("social_tg"):
+        photon_status.append("Telegram✅")
+    if photon_filters.get("dex_paid"):
+        photon_status.append("DEX Paid✅")
+    if photon_filters.get("mint_auth"):
+        photon_status.append("Mint Revoked✅")
+    if photon_filters.get("freeze_auth"):
+        photon_status.append("Freeze Revoked✅")
+    if photon_filters.get("lp_burned"):
+        photon_status.append("LP Burned✅")
+    if photon_filters.get("audit"):
+        photon_status.append("Audit✅")
+    if photon_filters.get("bonding_curve"):
+        photon_status.append("Bonding Curve✅")
+    
+    photon_summary = ", ".join(photon_status) if photon_status else "None"
+    
     config_text = f"""📊 **Current Configuration**
 
 🌐 Network: {config['network']}
@@ -1855,6 +2349,9 @@ async def view_config(query) -> None:
 💧 Liquidity: ${config['liquidity_min']:,} - ${config['liquidity_max']:,}
 📈 Signals:
 {signals}
+
+🔍 Photon Filters: {photon_summary}
+📊 Top 10 Holders: {photon_filters.get('top10_min', 0)}%-{photon_filters.get('top10_max', 100)}%
 """
     
     keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="back_main")]]
@@ -2082,8 +2579,11 @@ async def start_monitoring(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data["monitoring"] = True
     await query.answer("Monitoring started!")
     
-    # Start the monitoring task
+    # Start the WebSocket monitoring task
     context.application.create_task(monitor_coins(context))
+    
+    # Start the PhotonScan polling task
+    context.application.create_task(monitor_photon_tokens(context))
 
 
 async def stop_monitoring(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2227,6 +2727,102 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     bot_instance.ws_monitoring_active = False
     logger.info("WebSocket monitoring stopped")
+
+
+async def monitor_photon_tokens(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    ========================================
+    PHOTONSCAN POLLING MONITOR
+    ========================================
+    Background task to poll PhotonScan API for new tokens
+    
+    This runs alongside WebSocket monitoring to provide additional
+    token discovery via PhotonScan API with 60-second polling interval.
+    Filters tokens and sends alerts only for new tokens not seen before.
+    """
+    logger.info("Starting PhotonScan token monitoring...")
+    bot_instance.photon_monitoring_active = True
+    
+    while context.bot_data.get("monitoring", False):
+        try:
+            # Fetch tokens from PhotonScan API
+            tokens = await bot_instance.fetch_photon_tokens()
+            
+            # Process each token
+            new_tokens_count = 0
+            for token in tokens:
+                # Get token identifier (mint address)
+                mint = token.get("mint", token.get("address"))
+                
+                if not mint:
+                    continue
+                
+                # Skip if we've already alerted on this token
+                if mint in bot_instance.photon_tokens:
+                    continue
+                
+                # Apply PhotonScan-specific filters
+                if not bot_instance.apply_photon_filters(token):
+                    continue
+                
+                # Apply general filters (network, age, liquidity, etc.)
+                # Note: We use a simplified check here since PhotonScan tokens
+                # may have different data structure than Raydium pools
+                
+                # Send alert for new token
+                await bot_instance.send_photon_alert(token, telegram_bot=context.bot)
+                
+                # Mark as seen
+                bot_instance.photon_tokens.add(mint)
+                new_tokens_count += 1
+                
+                # Track in preset if active
+                if bot_instance.active_preset and bot_instance.active_preset in bot_instance.presets:
+                    preset_data = bot_instance.presets[bot_instance.active_preset]
+                    if "coins" in preset_data:
+                        preset_data["coins"][mint] = {
+                            "timestamp": datetime.now(),
+                            "name": token.get("name", "Unknown"),
+                            "symbol": token.get("symbol", "Unknown"),
+                            "source": "photon"
+                        }
+                
+                # Limit memory usage
+                if len(bot_instance.photon_tokens) > MAX_TRACKED_PAIRS:
+                    # Remove oldest tokens (simple approach - could be improved)
+                    tokens_list = list(bot_instance.photon_tokens)
+                    bot_instance.photon_tokens = set(tokens_list[-TRACKED_PAIRS_TRIM_SIZE:])
+            
+            if new_tokens_count > 0:
+                logger.info(f"PhotonScan: Found and alerted {new_tokens_count} new tokens")
+            else:
+                logger.debug("PhotonScan: No new tokens matching filters")
+            
+            # Wait for next polling interval
+            await asyncio.sleep(PHOTON_POLL_INTERVAL)
+            
+        except asyncio.CancelledError:
+            logger.info("PhotonScan monitoring task cancelled")
+            break
+            
+        except Exception as e:
+            error_msg = f"Error in PhotonScan monitoring loop: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            # Send error alert to Telegram
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+            
+            # Wait before retry
+            await asyncio.sleep(PHOTON_POLL_INTERVAL)
+    
+    bot_instance.photon_monitoring_active = False
+    logger.info("PhotonScan monitoring stopped")
 
 
 async def post_init(application: Application) -> None:

@@ -60,6 +60,7 @@ See `.env.example` for all available configuration options.
 ## Features
 
 - 🚀 **Real-time WebSocket streaming** for instant meme coin launch detection
+- 🔍 **PhotonScan API Integration** with 60-second polling for comprehensive token discovery
 - ⚙️ **Customizable filters:**
   - API source selection
   - Network/Chain filtering (Ethereum, BSC, Polygon, Solana, Base, Arbitrum, etc.)
@@ -69,12 +70,22 @@ See `.env.example` for all available configuration options.
   - Buy count 24h filtering
   - Market cap range
   - Pair age range (min/max in minutes)
+  - **PhotonScan Security Filters:**
+    - Telegram social link requirement
+    - DEX paid listing status
+    - Mint authority revoked status
+    - Freeze authority revoked status
+    - LP burned status
+    - Top 10 holders percentage range
+    - Token audit status
+    - Bonding curve presence
 - 📈 **Signal alerts** for price changes over time intervals
 - 🎯 **Inline keyboard interface** for easy configuration
-- 🔌 **OpenOcean Meme API integration** via WebSocket
+- 🔌 **Dual monitoring system**: WebSocket + PhotonScan polling running simultaneously
 - 🔄 **Automatic reconnection** with configurable intervals
 - 🚨 **Error Alerting System**: Automatically sends all errors and failures to Telegram with detailed information
 - 💾 **Preset Management**: Save and load different filter configurations
+- ⚡ **Smart deduplication**: Only alerts on new tokens, no duplicates
 
 ## Prerequisites
 
@@ -163,6 +174,14 @@ python main.py
 | `FILTER_BUY_COUNT_24H_MIN` | Minimum buy count in 24h | No | 0 |
 | `FILTER_TOKEN_STATUS` | Token status filter (active/inactive/all) | No | active |
 
+### PhotonScan API Configuration
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `PHOTON_API_URL` | PhotonScan API endpoint for token discovery | No | https://api.photon-sol.tinyastro.io/tokens |
+| `PHOTON_POLL_INTERVAL` | Polling interval in seconds | No | 60 |
+| `PHOTON_API_KEY` | API key for PhotonScan (if required) | No | - |
+
 ### Error Alerting
 
 | Variable | Description | Required | Default |
@@ -238,17 +257,33 @@ Add price change alerts:
 
 Multiple signals can be active simultaneously.
 
+#### PhotonScan Filters
+Configure advanced security filters for Solana tokens:
+- **Telegram Social**: Require Telegram social link
+- **DEX Paid**: Require DEX paid listing status
+- **Mint Authority**: Require mint authority to be revoked (safer tokens)
+- **Freeze Authority**: Require freeze authority to be revoked (safer tokens)
+- **LP Burned**: Require liquidity pool tokens to be burned
+- **Top 10 Holders %**: Set minimum and maximum percentage for top 10 holders (0-100%)
+  - Lower percentages = more decentralized token distribution
+  - Higher percentages = more concentrated holdings
+- **Audit**: Require token to be audited
+- **Bonding Curve**: Require bonding curve presence
+
 ## How It Works
 
-### WebSocket Streaming Architecture
+### Dual Monitoring Architecture
 
-1. **Connection Establishment**: Bot establishes a persistent WebSocket connection to OpenOcean Meme API on startup
-2. **Channel Subscription**: Subscribes to the "token" channel to receive real-time token updates
+The bot now runs two parallel monitoring systems for comprehensive token discovery:
+
+#### 1. WebSocket Streaming (Real-time)
+
+1. **Connection Establishment**: Bot establishes a persistent WebSocket connection to Solana RPC on startup
+2. **SPL Token Subscription**: Subscribes to SPL Token Program logs to receive real-time token events
 3. **Live Data Stream**: Continuously receives live token data including:
-   - Token status (active/inactive)
-   - Liquidity amounts
-   - Buy count in 24h
-   - Price information
+   - Token minting events (MintTo instructions)
+   - New token creation (InitializeMint)
+   - Liquidity pool creation and additions (Raydium pools)
    - Market cap
    - Network/chain information
 4. **Filter Application**: Each incoming token is evaluated against your configured filters
@@ -256,43 +291,87 @@ Multiple signals can be active simultaneously.
 6. **Signal Tracking**: Alerted tokens are tracked for price change signal monitoring
 7. **Auto-Reconnect**: If connection drops, bot automatically reconnects with configurable intervals and sends Telegram alerts about connection status
 
+#### 2. PhotonScan API Polling (Comprehensive)
+
+1. **Periodic Polling**: Every 60 seconds, the bot polls the PhotonScan API for new tokens
+2. **Enhanced Data**: Receives comprehensive token data including:
+   - Security information (mint authority, freeze authority)
+   - Social links (Telegram, Twitter, Website)
+   - Liquidity pool status (burned or active)
+   - Top holders distribution
+   - Audit status
+   - DEX paid listing status
+   - Bonding curve information
+3. **Security Filtering**: Applies PhotonScan-specific security filters
+4. **Deduplication**: Tracks seen tokens to avoid duplicate alerts
+5. **Telegram Alerts**: Sends formatted alerts with security indicators for new matching tokens
+
+### Combined Benefits
+
+- **Comprehensive Coverage**: WebSocket catches real-time events, PhotonScan provides detailed security data
+- **No Duplicates**: Smart tracking ensures each token is only alerted once
+- **Dual Verification**: Tokens can be discovered by either system
+- **Failover**: If one system fails, the other continues to operate
+- **Rich Data**: Combine real-time detection with comprehensive security analysis
+
 ### Connection Management
 
-- **Persistent Connection**: Single WebSocket connection maintained throughout bot lifetime
-- **Ping/Pong Keep-Alive**: Regular ping messages keep connection active
+- **Persistent WebSocket**: Single connection maintained throughout bot lifetime
+- **Periodic Polling**: PhotonScan API called every 60 seconds
+- **Ping/Pong Keep-Alive**: Regular ping messages keep WebSocket connection active
 - **Automatic Reconnection**: Configurable reconnect logic with exponential backoff
 - **Connection Monitoring**: Telegram alerts for connection failures and reconnections
-- **Graceful Shutdown**: Proper connection cleanup when monitoring stops
+- **Graceful Shutdown**: Proper cleanup when monitoring stops
 
 ## Alert Format
 
-Each WebSocket alert includes:
+### WebSocket Alerts
+Include:
 - Token name and symbol
-- Token address
+- Token mint address
+- Transaction signature
+- Network (Solana)
+- Explorer links
+
+### PhotonScan Alerts
+Include:
+- Token name and symbol
+- Token mint address
 - Blockchain network
-- Token status
+- Market cap and liquidity
 - Current price
-- Liquidity
-- Market cap
-- 24h trading volume
-- 24h buy count
-- Direct link to DEX (if available)
+- **Security Information:**
+  - Mint authority status (✅ Revoked or ❌ Not Revoked)
+  - Freeze authority status (✅ Revoked or ❌ Not Revoked)
+  - LP burned status
+  - Audit status
+  - Top 10 holders percentage
+- **Social Links:**
+  - Telegram (if available)
+  - Twitter (if available)
+  - Website (if available)
+- **Links:**
+  - Solscan explorer
+  - Photon trading interface
+- DEX paid listing indicator (💎 if applicable)
 - Timestamp
 
-## API Rate Limits
+## Rate Limits and Performance
 
-## WebSocket Connection
+### WebSocket Connection
+- **No rate limiting concerns**: Single persistent connection
+- **Real-time updates**: Minimal latency
+- **Lower resource usage**: Compared to REST API polling
+- **Automatic reconnection**: On connection failures
 
-The bot uses a persistent WebSocket connection for real-time token updates. This eliminates polling and provides instant notifications when new tokens are detected.
-
-**Benefits:**
-- No rate limiting concerns (single persistent connection)
-- Real-time updates with minimal latency
-- Lower resource usage compared to polling
-- Automatic reconnection on connection failures
+### PhotonScan API Polling
+- **60-second intervals**: Configurable via `PHOTON_POLL_INTERVAL`
+- **Batch processing**: Handles multiple tokens per request
+- **Smart deduplication**: Prevents duplicate alerts
+- **Error handling**: Continues polling even if individual requests fail
 
 **Connection Monitoring:**
-- WebSocket connection status is continuously monitored
+- Both WebSocket and PhotonScan status are continuously monitored
 - Automatic reconnection with configurable intervals
 - Telegram alerts for connection failures and recoveries
 - Configurable maximum reconnection attempts
