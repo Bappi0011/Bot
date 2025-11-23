@@ -154,6 +154,7 @@ FILTER_BUY_COUNT_24H_MIN = int(os.getenv("FILTER_BUY_COUNT_24H_MIN", "0"))
 FILTER_TOKEN_STATUS = os.getenv("FILTER_TOKEN_STATUS", "active").lower()
 
 # Configuration constants
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (deprecated, for backward compatibility)
 MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
 TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
 
@@ -379,6 +380,17 @@ class MemeCoinBot:
             
         Returns:
             True if data is valid, False otherwise
+            
+        Note:
+            This validates based on expected OpenOcean Meme API response structure.
+            The API is expected to send messages with token-related fields such as:
+            - 'token', 'tokenAddress', 'address', or 'mint' for token identifier
+            - 'status' for token status (active/inactive)
+            - 'liquidity' for liquidity amount
+            - 'buyCount24h' for 24-hour buy count
+            
+            If the actual API response format differs, these field names should be
+            updated to match the real API specification.
         """
         # Check for essential fields that indicate this is token data
         # Adjust based on actual OpenOcean API response format
@@ -386,7 +398,8 @@ class MemeCoinBot:
             return False
         
         # Look for common token data fields
-        # These are examples - adjust based on actual API response
+        # These field names are based on typical meme token API responses
+        # Update these if OpenOcean API uses different field names
         has_token_fields = any(key in data for key in [
             'token', 'tokenAddress', 'address', 'mint',
             'status', 'liquidity', 'buyCount24h'
@@ -485,23 +498,40 @@ class MemeCoinBot:
             True if token passes filters, False otherwise
         """
         try:
-            # Extract relevant fields from WebSocket data
+            # Extract relevant fields from WebSocket data with safe type conversion
             status = token_data.get("status", "unknown").lower()
-            liquidity = float(token_data.get("liquidity", 0))
-            buy_count_24h = int(token_data.get("buyCount24h", 0))
             
-            # Apply status filter
+            # Safe conversion with fallback to 0
+            try:
+                liquidity = float(token_data.get("liquidity", 0))
+            except (ValueError, TypeError):
+                liquidity = 0
+            
+            try:
+                buy_count_24h = int(token_data.get("buyCount24h", 0))
+            except (ValueError, TypeError):
+                buy_count_24h = 0
+            
+            # Apply status filter (from environment variable)
             if FILTER_TOKEN_STATUS != "all":
                 if FILTER_TOKEN_STATUS == "active" and status != "active":
                     return False
                 elif FILTER_TOKEN_STATUS == "inactive" and status != "inactive":
                     return False
             
-            # Apply liquidity filter
+            # Apply liquidity filter (use environment variable filters as primary)
+            # These are the min/max thresholds set via environment
             if not (FILTER_LIQUIDITY_MIN <= liquidity <= FILTER_LIQUIDITY_MAX):
                 return False
             
-            # Apply buy count filter
+            # Also check against user config liquidity settings if they differ
+            # This allows both env-based and UI-based filtering
+            config_liq_min = self.config.get("liquidity_min", 0)
+            config_liq_max = self.config.get("liquidity_max", float('inf'))
+            if not (config_liq_min <= liquidity <= config_liq_max):
+                return False
+            
+            # Apply buy count filter (from environment variable)
             if buy_count_24h < FILTER_BUY_COUNT_24H_MIN:
                 return False
             
@@ -509,11 +539,6 @@ class MemeCoinBot:
             network = token_data.get("network", "").lower()
             if self.config["network"] != "all" and network and self.config["network"].lower() != network:
                 return False
-            
-            # Apply additional liquidity filter from config if available
-            if "liquidity" in token_data:
-                if not (self.config["liquidity_min"] <= liquidity <= self.config["liquidity_max"]):
-                    return False
             
             return True
             
