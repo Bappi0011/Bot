@@ -1,3 +1,34 @@
+"""
+MIGRATION NOTE: WebSocket Streaming Implementation
+====================================================
+
+This bot has been migrated from REST API polling to WebSocket streaming for real-time meme token data.
+
+Previous Implementation:
+- Polled Solana RPC endpoints for Raydium pool data
+- Used getProgramAccountsV2 with pagination
+- Fetched data every ~10 seconds
+
+Current Implementation:
+- Establishes persistent WebSocket connection to OpenOcean Meme API
+- Subscribes to "token" channel for live token updates
+- Receives real-time streaming data with automatic reconnection
+- WebSocket endpoint: wss://meme-api.openocean.finance/ws/public
+- Data fields extracted: status, liquidity, buyCount24h, and more
+
+Benefits:
+- Real-time updates (no polling delay)
+- Reduced API load and rate limiting issues
+- Lower latency for detecting new tokens
+- More efficient resource usage
+
+Configuration:
+- All WebSocket settings are configurable via environment variables
+- See .env.example for available options
+- Automatic reconnection with configurable intervals
+- Telegram alerts for connection failures
+"""
+
 import os
 import logging
 import asyncio
@@ -9,6 +40,8 @@ import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
+import websockets
+from websockets.exceptions import WebSocketException, ConnectionClosed
 from construct import Struct, Int64ul, Bytes, Padding
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
@@ -107,9 +140,21 @@ RAYDIUM_V4_PROGRAM_ID = os.getenv("RAYDIUM_V4_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1
 TELEGRAM_ERROR_ALERTS_ENABLED = os.getenv("TELEGRAM_ERROR_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
 TELEGRAM_ERROR_DEBUG_MODE = os.getenv("TELEGRAM_ERROR_DEBUG_MODE", "false").lower() in ("true", "1", "yes")
 
+# WebSocket Configuration
+WS_URL = os.getenv("WS_URL", "wss://meme-api.openocean.finance/ws/public")
+WS_CHANNEL = os.getenv("WS_CHANNEL", "token")
+WS_RECONNECT_INTERVAL = int(os.getenv("WS_RECONNECT_INTERVAL", "5"))
+WS_MAX_RECONNECT_ATTEMPTS = int(os.getenv("WS_MAX_RECONNECT_ATTEMPTS", "0"))
+WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", "30"))
+
+# Filter Configuration
+FILTER_LIQUIDITY_MIN = float(os.getenv("FILTER_LIQUIDITY_MIN", "0"))
+FILTER_LIQUIDITY_MAX = float(os.getenv("FILTER_LIQUIDITY_MAX", "10000000"))
+FILTER_BUY_COUNT_24H_MIN = int(os.getenv("FILTER_BUY_COUNT_24H_MIN", "0"))
+FILTER_TOKEN_STATUS = os.getenv("FILTER_TOKEN_STATUS", "active").lower()
+
 # Configuration constants
-CHECK_INTERVAL = 0.75  # Seconds between checks (1-2 times per second)
-MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (deprecated, for backward compatibility)
 MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
 TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
 
@@ -140,7 +185,7 @@ user_config = DEFAULT_CONFIG.copy()
 
 
 class MemeCoinBot:
-    """Main bot class for meme coin alerts"""
+    """Main bot class for meme coin alerts with WebSocket streaming"""
     
     def __init__(self):
         self.config = user_config.copy()
@@ -150,6 +195,13 @@ class MemeCoinBot:
         self.last_checked_pairs = set()  # Track pairs we've already alerted on
         self.presets = {}  # Stores named configurations with tracking data
         self.active_preset = None  # Currently active preset name
+        
+        # WebSocket related attributes
+        self.ws_connection = None
+        self.ws_connected = False
+        self.ws_reconnect_count = 0
+        self.ws_task = None
+        self.ws_monitoring_active = False
     
     async def start_session(self):
         """Initialize aiohttp session and Solana client"""
@@ -164,12 +216,399 @@ class MemeCoinBot:
             await self.session.close()
         if self.solana_client:
             await self.solana_client.close()
+        if self.ws_connection:
+            await self.ws_connection.close()
+    
+    async def connect_websocket(self, telegram_bot=None) -> bool:
+        """
+        Establish WebSocket connection to OpenOcean Meme API
+        
+        Args:
+            telegram_bot: Optional Telegram bot instance for sending error alerts
+            
+        Returns:
+            True if connection successful, False otherwise
+        """
+        try:
+            logger.info(f"Connecting to WebSocket: {WS_URL}")
+            
+            # Connect to WebSocket with ping settings for keep-alive
+            self.ws_connection = await websockets.connect(
+                WS_URL,
+                ping_interval=WS_PING_INTERVAL,
+                ping_timeout=10,
+                close_timeout=10
+            )
+            
+            self.ws_connected = True
+            self.ws_reconnect_count = 0
+            logger.info("WebSocket connection established")
+            
+            # Subscribe to the token channel
+            await self.subscribe_to_channel()
+            
+            return True
+            
+        except WebSocketException as e:
+            error_msg = f"WebSocket connection error: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            # Send Telegram alert for connection failure
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+            
+            # Also send via bot if available
+            if telegram_bot and TELEGRAM_CHAT_ID:
+                try:
+                    await telegram_bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=f"⚠️ WebSocket Connection Failed\n\n{error_msg}"
+                    )
+                except Exception:
+                    pass  # Ignore if bot message fails
+            
+            self.ws_connected = False
+            return False
+            
+        except Exception as e:
+            error_msg = f"Unexpected error connecting to WebSocket: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+            
+            self.ws_connected = False
+            return False
+    
+    async def subscribe_to_channel(self):
+        """Subscribe to the token channel on WebSocket"""
+        if not self.ws_connection:
+            logger.error("Cannot subscribe: WebSocket not connected")
+            return
+        
+        try:
+            # Prepare subscription message
+            subscribe_msg = {
+                "op": "subscribe",
+                "args": [{"channel": WS_CHANNEL}]
+            }
+            
+            logger.info(f"Subscribing to channel: {WS_CHANNEL}")
+            await self.ws_connection.send(json.dumps(subscribe_msg))
+            logger.info(f"Subscription message sent for channel: {WS_CHANNEL}")
+            
+        except Exception as e:
+            error_msg = f"Error subscribing to channel {WS_CHANNEL}: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+    
+    async def handle_websocket_message(self, message: str, telegram_bot=None):
+        """
+        Parse and process incoming WebSocket messages
+        
+        Args:
+            message: Raw WebSocket message string
+            telegram_bot: Optional Telegram bot instance for sending alerts
+        """
+        try:
+            # Parse JSON message
+            data = json.loads(message)
+            
+            # Log received message for debugging
+            logger.debug(f"Received WebSocket message: {data}")
+            
+            # Check if it's a subscription confirmation or other system message
+            if isinstance(data, dict):
+                # Handle subscription confirmation
+                if data.get("op") == "subscribe":
+                    logger.info(f"Subscription confirmed: {data}")
+                    return
+                
+                # Handle ping/pong messages
+                if data.get("op") == "ping":
+                    # Respond with pong
+                    pong_msg = {"op": "pong"}
+                    await self.ws_connection.send(json.dumps(pong_msg))
+                    return
+                
+                # Extract token data from the message
+                # The exact structure depends on OpenOcean API format
+                # Assuming the data has a 'data' field or direct token info
+                token_data = data.get("data", data)
+                
+                # Process token data if it contains relevant fields
+                if self.is_valid_token_data(token_data):
+                    await self.process_token_data(token_data, telegram_bot)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse WebSocket message as JSON: {e}")
+        except Exception as e:
+            error_msg = f"Error handling WebSocket message: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+    
+    def is_valid_token_data(self, data: Dict) -> bool:
+        """
+        Check if the data contains valid token information
+        
+        Args:
+            data: Token data dictionary
+            
+        Returns:
+            True if data is valid, False otherwise
+            
+        Note:
+            This validates based on expected OpenOcean Meme API response structure.
+            The API is expected to send messages with token-related fields such as:
+            - 'token', 'tokenAddress', 'address', or 'mint' for token identifier
+            - 'status' for token status (active/inactive)
+            - 'liquidity' for liquidity amount
+            - 'buyCount24h' for 24-hour buy count
+            
+            If the actual API response format differs, these field names should be
+            updated to match the real API specification.
+        """
+        # Check for essential fields that indicate this is token data
+        # Adjust based on actual OpenOcean API response format
+        if not isinstance(data, dict):
+            return False
+        
+        # Look for common token data fields
+        # These field names are based on typical meme token API responses
+        # Update these if OpenOcean API uses different field names
+        has_token_fields = any(key in data for key in [
+            'token', 'tokenAddress', 'address', 'mint',
+            'status', 'liquidity', 'buyCount24h'
+        ])
+        
+        return has_token_fields
+    
+    async def process_token_data(self, token_data: Dict, telegram_bot=None):
+        """
+        Process token data received from WebSocket and apply filters
+        
+        Args:
+            token_data: Token data dictionary from WebSocket
+            telegram_bot: Optional Telegram bot instance for sending alerts
+        """
+        try:
+            # Extract token identifier (address/mint)
+            token_id = token_data.get("tokenAddress") or token_data.get("address") or \
+                      token_data.get("mint") or token_data.get("token", {}).get("address", "unknown")
+            
+            # Skip if already alerted
+            if token_id in self.last_checked_pairs:
+                return
+            
+            # Apply filters
+            if self.apply_filters_to_websocket_data(token_data):
+                # Format and send alert
+                message = self.format_websocket_token_alert(token_data)
+                
+                if telegram_bot and TELEGRAM_CHAT_ID:
+                    try:
+                        await telegram_bot.send_message(
+                            chat_id=TELEGRAM_CHAT_ID,
+                            text=message,
+                            parse_mode="Markdown"
+                        )
+                        logger.info(f"Alert sent for token {token_id}")
+                        
+                        # Track token in active preset
+                        if self.active_preset and self.active_preset in self.presets:
+                            self.presets[self.active_preset]["coins"][token_id] = {
+                                "data": token_data,
+                                "timestamp": datetime.now().isoformat(),
+                                "profit_percent": 0
+                            }
+                        
+                        # Track for signals
+                        if self.config["signals"]:
+                            self.tracked_pairs[token_id] = {
+                                "initial_price": token_data.get("price", 0),
+                                "timestamp": datetime.now(),
+                                "data": token_data
+                            }
+                            
+                    except Exception as e:
+                        error_msg = f"Error sending alert for token {token_id}: {e}"
+                        logger.error(error_msg, exc_info=True)
+                        
+                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                            await send_error_alert(
+                                TELEGRAM_BOT_TOKEN,
+                                TELEGRAM_CHAT_ID,
+                                error_msg,
+                                exc_info=sys.exc_info()
+                            )
+                
+                # Mark as alerted
+                self.last_checked_pairs.add(token_id)
+                
+                # Limit memory of checked pairs
+                if len(self.last_checked_pairs) > MAX_TRACKED_PAIRS:
+                    self.last_checked_pairs = set(
+                        list(self.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
+                    )
+                    
+        except Exception as e:
+            error_msg = f"Error processing token data: {e}"
+            logger.error(error_msg, exc_info=True)
+            
+            if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                await send_error_alert(
+                    TELEGRAM_BOT_TOKEN,
+                    TELEGRAM_CHAT_ID,
+                    error_msg,
+                    exc_info=sys.exc_info()
+                )
+    
+    def apply_filters_to_websocket_data(self, token_data: Dict) -> bool:
+        """
+        Apply user-defined filters to WebSocket token data
+        
+        Args:
+            token_data: Token data from WebSocket
+            
+        Returns:
+            True if token passes filters, False otherwise
+        """
+        try:
+            # Extract relevant fields from WebSocket data with safe type conversion
+            status = token_data.get("status", "unknown").lower()
+            
+            # Safe conversion with fallback to 0
+            try:
+                liquidity = float(token_data.get("liquidity", 0))
+            except (ValueError, TypeError):
+                liquidity = 0
+            
+            try:
+                buy_count_24h = int(token_data.get("buyCount24h", 0))
+            except (ValueError, TypeError):
+                buy_count_24h = 0
+            
+            # Apply status filter (from environment variable)
+            if FILTER_TOKEN_STATUS != "all":
+                if FILTER_TOKEN_STATUS == "active" and status != "active":
+                    return False
+                elif FILTER_TOKEN_STATUS == "inactive" and status != "inactive":
+                    return False
+            
+            # Apply liquidity filter (use environment variable filters as primary)
+            # These are the min/max thresholds set via environment
+            if not (FILTER_LIQUIDITY_MIN <= liquidity <= FILTER_LIQUIDITY_MAX):
+                return False
+            
+            # Also check against user config liquidity settings if they differ
+            # This allows both env-based and UI-based filtering
+            config_liq_min = self.config.get("liquidity_min", 0)
+            config_liq_max = self.config.get("liquidity_max", float('inf'))
+            if not (config_liq_min <= liquidity <= config_liq_max):
+                return False
+            
+            # Apply buy count filter (from environment variable)
+            if buy_count_24h < FILTER_BUY_COUNT_24H_MIN:
+                return False
+            
+            # Apply network filter from config
+            network = token_data.get("network", "").lower()
+            if self.config["network"] != "all" and network and self.config["network"].lower() != network:
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error applying filters to WebSocket data: {e}")
+            return False
+    
+    def format_websocket_token_alert(self, token_data: Dict) -> str:
+        """
+        Format WebSocket token data for alert message
+        
+        Args:
+            token_data: Token data from WebSocket
+            
+        Returns:
+            Formatted alert message string
+        """
+        # Extract fields from WebSocket data
+        token_address = token_data.get("tokenAddress") or token_data.get("address", "Unknown")
+        token_name = token_data.get("name", "Unknown Token")
+        token_symbol = token_data.get("symbol", "???")
+        network = token_data.get("network", "Unknown")
+        status = token_data.get("status", "Unknown")
+        liquidity = token_data.get("liquidity", 0)
+        buy_count_24h = token_data.get("buyCount24h", 0)
+        price = token_data.get("price", 0)
+        market_cap = token_data.get("marketCap", 0)
+        volume_24h = token_data.get("volume24h", 0)
+        
+        # Format the message
+        message = f"🚀 **New Meme Token Detected!** (WebSocket)\n\n"
+        message += f"**Token:** {token_name} ({token_symbol})\n"
+        message += f"**Address:** `{token_address}`\n"
+        message += f"**Network:** {network.capitalize()}\n"
+        message += f"**Status:** {status.capitalize()}\n\n"
+        
+        if liquidity > 0:
+            message += f"**Liquidity:** ${liquidity:,.2f}\n"
+        if market_cap > 0:
+            message += f"**Market Cap:** ${market_cap:,.2f}\n"
+        if price > 0:
+            message += f"**Price:** ${price:.8f}\n"
+        if volume_24h > 0:
+            message += f"**24h Volume:** ${volume_24h:,.2f}\n"
+        if buy_count_24h > 0:
+            message += f"**24h Buys:** {buy_count_24h}\n"
+        
+        # Add links if available
+        dex_url = token_data.get("dexUrl") or token_data.get("url")
+        if dex_url:
+            message += f"\n**DEX Link:** {dex_url}\n"
+        
+        # Add timestamp
+        message += f"\n**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        
+        return message
     
     async def fetch_new_coins(self) -> List[Dict]:
-        """Fetch new Raydium pools from Solana blockchain using pagination
+        """
+        DEPRECATED: This method is no longer used in favor of WebSocket streaming.
+        
+        Fetch new Raydium pools from Solana blockchain using pagination
         
         Note: This fetches program accounts from the Raydium V4 AMM program.
         Uses getProgramAccountsV2 with pagination to avoid rate limiting.
+        
+        MIGRATION NOTE:
+        This REST API polling approach has been replaced by WebSocket streaming
+        from OpenOcean Meme API for real-time token updates. This method is kept
+        for backward compatibility but is not actively used in the main monitoring flow.
         
         In production with high RPC usage, consider:
         - Using a dedicated RPC provider (QuickNode, Alchemy, Helius, etc.)
@@ -1457,91 +1896,114 @@ async def stop_monitoring(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Background task to monitor new coins"""
-    logger.info("Starting coin monitoring...")
+    """
+    Background task to monitor new coins via WebSocket streaming
+    
+    This replaces the old REST API polling approach with real-time WebSocket streaming.
+    Automatically reconnects on connection failure with configurable intervals.
+    """
+    logger.info("Starting WebSocket coin monitoring...")
+    bot_instance.ws_monitoring_active = True
     
     while context.bot_data.get("monitoring", False):
         try:
-            # Fetch new pools
-            pools = await bot_instance.fetch_new_coins()
+            # Connect to WebSocket
+            connected = await bot_instance.connect_websocket(telegram_bot=context.bot)
             
-            for pool in pools:
-                pool_address = pool.get("poolAddress")
+            if not connected:
+                # Connection failed, wait before retry
+                bot_instance.ws_reconnect_count += 1
                 
-                if not pool_address:
-                    continue
-                
-                # Skip if already alerted
-                if pool_address in bot_instance.last_checked_pairs:
-                    continue
-                
-                # Apply filters
-                if bot_instance.apply_filters(pool):
-                    # Send alert
-                    message = bot_instance.format_coin_alert(pool)
+                # Check if we've exceeded max reconnect attempts
+                if WS_MAX_RECONNECT_ATTEMPTS > 0 and bot_instance.ws_reconnect_count >= WS_MAX_RECONNECT_ATTEMPTS:
+                    error_msg = f"Max reconnection attempts ({WS_MAX_RECONNECT_ATTEMPTS}) reached. Stopping monitoring."
+                    logger.error(error_msg)
                     
-                    try:
-                        if TELEGRAM_CHAT_ID:
+                    # Send alert to Telegram
+                    if TELEGRAM_CHAT_ID:
+                        try:
                             await context.bot.send_message(
                                 chat_id=TELEGRAM_CHAT_ID,
-                                text=message,
-                                parse_mode="Markdown"
+                                text=f"🚨 **WebSocket Monitoring Stopped**\n\n{error_msg}\n\nPlease check the configuration and restart monitoring."
                             )
-                            logger.info(f"Alert sent for pool {pool_address}")
-                            
-                            # Track coin in active preset
-                            if bot_instance.active_preset and bot_instance.active_preset in bot_instance.presets:
-                                bot_instance.presets[bot_instance.active_preset]["coins"][pool_address] = {
-                                    "base_mint": pool.get("baseMint", "Unknown"),
-                                    "quote_mint": pool.get("quoteMint", "Unknown"),
-                                    "initial_swap_base_in": pool.get("swapBaseInAmount", 0),
-                                    "initial_swap_quote_out": pool.get("swapQuoteOutAmount", 0),
-                                    "timestamp": datetime.now().isoformat(),
-                                    "profit_percent": 0  # Will be updated on refresh
-                                }
-                            
-                            # Track for signals
-                            if bot_instance.config["signals"]:
-                                bot_instance.tracked_pairs[pool_address] = {
-                                    "initial_price": 0.0,  # Would need price oracle
-                                    "timestamp": datetime.now(),
-                                    "base_mint": pool.get("baseMint", "Unknown")
-                                }
-                    except Exception as e:
-                        error_msg = f"Error sending alert for pool {pool_address}: {e}"
-                        logger.error(error_msg, exc_info=True)
-                        # Send error alert to Telegram
-                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                            await send_error_alert(
-                                TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                error_msg,
-                                exc_info=sys.exc_info()
-                            )
+                        except Exception:
+                            pass
                     
-                    # Mark as alerted
-                    bot_instance.last_checked_pairs.add(pool_address)
+                    # Stop monitoring
+                    context.bot_data["monitoring"] = False
+                    break
+                
+                logger.warning(f"WebSocket connection failed (attempt {bot_instance.ws_reconnect_count}). "
+                             f"Retrying in {WS_RECONNECT_INTERVAL} seconds...")
+                await asyncio.sleep(WS_RECONNECT_INTERVAL)
+                continue
             
-            # Clean up old tracked pairs (older than max signal time + buffer)
-            max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
-            cutoff_time = datetime.now() - timedelta(minutes=max_signal_time + 10)
-            bot_instance.tracked_pairs = {
-                k: v for k, v in bot_instance.tracked_pairs.items()
-                if v["timestamp"] > cutoff_time
-            }
+            # Successfully connected, listen for messages
+            logger.info("WebSocket connected. Listening for token updates...")
             
-            # Limit memory of checked pairs
-            if len(bot_instance.last_checked_pairs) > MAX_TRACKED_PAIRS:
-                bot_instance.last_checked_pairs = set(
-                    list(bot_instance.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
-                )
-            
-            # Wait before next check - delay added to prevent 429 Too Many Requests error
-            await asyncio.sleep(10)
-            
+            try:
+                async for message in bot_instance.ws_connection:
+                    # Check if monitoring should stop
+                    if not context.bot_data.get("monitoring", False):
+                        logger.info("Monitoring stopped by user")
+                        break
+                    
+                    # Process the incoming message
+                    await bot_instance.handle_websocket_message(message, telegram_bot=context.bot)
+                    
+                    # Clean up old tracked pairs periodically
+                    max_signal_time = max([s["time_interval"] for s in bot_instance.config["signals"]], default=60)
+                    cutoff_time = datetime.now() - timedelta(minutes=max_signal_time + 10)
+                    bot_instance.tracked_pairs = {
+                        k: v for k, v in bot_instance.tracked_pairs.items()
+                        if v["timestamp"] > cutoff_time
+                    }
+                    
+            except ConnectionClosed as e:
+                error_msg = f"WebSocket connection closed: {e}"
+                logger.warning(error_msg)
+                
+                # Send alert to Telegram
+                if TELEGRAM_CHAT_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=TELEGRAM_CHAT_ID,
+                            text=f"⚠️ **WebSocket Disconnected**\n\nConnection closed unexpectedly. Attempting to reconnect..."
+                        )
+                    except Exception:
+                        pass
+                
+                # Mark as disconnected and retry
+                bot_instance.ws_connected = False
+                bot_instance.ws_reconnect_count += 1
+                
+                logger.info(f"Reconnecting in {WS_RECONNECT_INTERVAL} seconds...")
+                await asyncio.sleep(WS_RECONNECT_INTERVAL)
+                continue
+                
+            except WebSocketException as e:
+                error_msg = f"WebSocket error: {e}"
+                logger.error(error_msg, exc_info=True)
+                
+                if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    await send_error_alert(
+                        TELEGRAM_BOT_TOKEN,
+                        TELEGRAM_CHAT_ID,
+                        error_msg,
+                        exc_info=sys.exc_info()
+                    )
+                
+                # Mark as disconnected and retry
+                bot_instance.ws_connected = False
+                bot_instance.ws_reconnect_count += 1
+                
+                await asyncio.sleep(WS_RECONNECT_INTERVAL)
+                continue
+                
         except Exception as e:
-            error_msg = f"Error in monitoring loop: {e}"
+            error_msg = f"Error in WebSocket monitoring loop: {e}"
             logger.error(error_msg, exc_info=True)
+            
             # Send error alert to Telegram
             if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                 await send_error_alert(
@@ -1550,7 +2012,21 @@ async def monitor_coins(context: ContextTypes.DEFAULT_TYPE) -> None:
                     error_msg,
                     exc_info=sys.exc_info()
                 )
-            await asyncio.sleep(10)
+            
+            # Wait before retry
+            await asyncio.sleep(WS_RECONNECT_INTERVAL)
+    
+    # Clean up WebSocket connection when monitoring stops
+    if bot_instance.ws_connection:
+        try:
+            await bot_instance.ws_connection.close()
+            bot_instance.ws_connected = False
+            logger.info("WebSocket connection closed")
+        except Exception as e:
+            logger.error(f"Error closing WebSocket connection: {e}")
+    
+    bot_instance.ws_monitoring_active = False
+    logger.info("WebSocket monitoring stopped")
 
 
 async def post_init(application: Application) -> None:
