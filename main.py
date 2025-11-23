@@ -1428,7 +1428,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle button callbacks
     
     Note: Conflict errors may occur if multiple bot instances are running simultaneously.
-    Ensure only one instance is active to avoid "Message is not modified" errors.
+    Ensure only one instance is active to avoid various conflict-related errors.
     """
     query = update.callback_query
     await query.answer()
