@@ -2,6 +2,53 @@
 
 A Telegram bot that monitors and alerts on newly launched meme coins with customizable filters and price change signals.
 
+## 🔄 Migration Notice: WebSocket Streaming
+
+**This bot has been migrated from REST API polling to WebSocket streaming for real-time token data.**
+
+### What Changed?
+
+**Before (v1.x):**
+- Polled Solana RPC endpoints for Raydium pool data every ~10 seconds
+- Used `getProgramAccountsV2` with pagination
+- Higher latency and API rate limiting concerns
+
+**Now (v2.x):**
+- Real-time WebSocket streaming from OpenOcean Meme API
+- Persistent connection to `wss://meme-api.openocean.finance/ws/public`
+- Subscribes to "token" channel for live updates
+- Automatic reconnection with configurable intervals
+- Lower latency, more efficient, real-time alerts
+
+### Benefits of WebSocket Migration
+
+✅ **Real-time Updates** - No polling delay, instant notifications  
+✅ **Reduced API Load** - Single persistent connection vs repeated polling  
+✅ **Lower Latency** - Immediate token detection  
+✅ **More Efficient** - Less resource usage and network overhead  
+✅ **Auto-Reconnect** - Robust connection handling with Telegram alerts on failures
+
+### Configuration
+
+All WebSocket settings are configurable via environment variables in `.env`:
+
+```bash
+# WebSocket Configuration
+WS_URL=wss://meme-api.openocean.finance/ws/public
+WS_CHANNEL=token
+WS_RECONNECT_INTERVAL=5
+WS_MAX_RECONNECT_ATTEMPTS=0
+WS_PING_INTERVAL=30
+
+# Filter Configuration
+FILTER_LIQUIDITY_MIN=0
+FILTER_LIQUIDITY_MAX=10000000
+FILTER_BUY_COUNT_24H_MIN=0
+FILTER_TOKEN_STATUS=active
+```
+
+See `.env.example` for all available configuration options.
+
 ## Quick Start
 
 1. Get a Telegram Bot Token from [@BotFather](https://t.me/BotFather)
@@ -12,21 +59,22 @@ A Telegram bot that monitors and alerts on newly launched meme coins with custom
 
 ## Features
 
-- 🚀 Real-time monitoring of new meme coin launches
-- ⚙️ Customizable filters:
+- 🚀 **Real-time WebSocket streaming** for instant meme coin launch detection
+- ⚙️ **Customizable filters:**
   - API source selection
   - Network/Chain filtering (Ethereum, BSC, Polygon, Solana, Base, Arbitrum, etc.)
   - Social links requirements (Telegram, Twitter, Website)
-  - Pair age range (min/max in minutes)
+  - Liquidity range filtering
+  - Token status filtering (active/inactive)
+  - Buy count 24h filtering
   - Market cap range
-  - Liquidity range
-  - Dev hold percentage range
-  - Top 10 holders percentage range
-- 📈 Signal alerts for price changes over time intervals
-- 🎯 Inline keyboard interface for easy configuration
-- 📊 Integration with DexScreener API
-- 🔄 Checks for new coins 1-2 times per second
+  - Pair age range (min/max in minutes)
+- 📈 **Signal alerts** for price changes over time intervals
+- 🎯 **Inline keyboard interface** for easy configuration
+- 🔌 **OpenOcean Meme API integration** via WebSocket
+- 🔄 **Automatic reconnection** with configurable intervals
 - 🚨 **Error Alerting System**: Automatically sends all errors and failures to Telegram with detailed information
+- 💾 **Preset Management**: Save and load different filter configurations
 
 ## Prerequisites
 
@@ -89,14 +137,45 @@ python main.py
 
 ## Environment Variables
 
+### Required Variables
+
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather | Yes | - |
 | `TELEGRAM_CHAT_ID` | Chat ID where alerts will be sent | Yes | - |
+
+### WebSocket Configuration
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `WS_URL` | OpenOcean WebSocket endpoint | No | wss://meme-api.openocean.finance/ws/public |
+| `WS_CHANNEL` | WebSocket channel to subscribe to | No | token |
+| `WS_RECONNECT_INTERVAL` | Reconnection interval in seconds | No | 5 |
+| `WS_MAX_RECONNECT_ATTEMPTS` | Max reconnect attempts (0 = unlimited) | No | 0 |
+| `WS_PING_INTERVAL` | WebSocket ping interval in seconds | No | 30 |
+
+### Filter Configuration
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `FILTER_LIQUIDITY_MIN` | Minimum liquidity threshold in USD | No | 0 |
+| `FILTER_LIQUIDITY_MAX` | Maximum liquidity threshold in USD | No | 10000000 |
+| `FILTER_BUY_COUNT_24H_MIN` | Minimum buy count in 24h | No | 0 |
+| `FILTER_TOKEN_STATUS` | Token status filter (active/inactive/all) | No | active |
+
+### Error Alerting
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
 | `TELEGRAM_ERROR_ALERTS_ENABLED` | Enable/disable error alerts to Telegram (true/false) | No | true |
 | `TELEGRAM_ERROR_DEBUG_MODE` | Enable debug mode for additional context in errors (true/false) | No | false |
-| `SOLANA_RPC_URL` | Solana RPC endpoint URL | No | https://api.mainnet-beta.solana.com |
-| `RAYDIUM_V4_PROGRAM_ID` | Raydium V4 AMM Program ID | No | 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 |
+
+### Legacy Variables (Deprecated)
+
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `SOLANA_RPC_URL` | Solana RPC endpoint URL (deprecated, kept for compatibility) | No | https://api.mainnet-beta.solana.com |
+| `RAYDIUM_V4_PROGRAM_ID` | Raydium V4 AMM Program ID (deprecated, kept for compatibility) | No | 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 |
 
 ## Usage
 
@@ -161,28 +240,62 @@ Multiple signals can be active simultaneously.
 
 ## How It Works
 
-1. The bot fetches the latest coin pairs from the DexScreener API
-2. Applies your configured filters to each pair
-3. Sends alerts for coins that match your criteria
-4. Tracks alerted coins for signal monitoring
-5. Sends additional alerts when price change thresholds are met
+### WebSocket Streaming Architecture
+
+1. **Connection Establishment**: Bot establishes a persistent WebSocket connection to OpenOcean Meme API on startup
+2. **Channel Subscription**: Subscribes to the "token" channel to receive real-time token updates
+3. **Live Data Stream**: Continuously receives live token data including:
+   - Token status (active/inactive)
+   - Liquidity amounts
+   - Buy count in 24h
+   - Price information
+   - Market cap
+   - Network/chain information
+4. **Filter Application**: Each incoming token is evaluated against your configured filters
+5. **Alert Dispatch**: Tokens matching your criteria trigger instant Telegram alerts
+6. **Signal Tracking**: Alerted tokens are tracked for price change signal monitoring
+7. **Auto-Reconnect**: If connection drops, bot automatically reconnects with configurable intervals and sends Telegram alerts about connection status
+
+### Connection Management
+
+- **Persistent Connection**: Single WebSocket connection maintained throughout bot lifetime
+- **Ping/Pong Keep-Alive**: Regular ping messages keep connection active
+- **Automatic Reconnection**: Configurable reconnect logic with exponential backoff
+- **Connection Monitoring**: Telegram alerts for connection failures and reconnections
+- **Graceful Shutdown**: Proper connection cleanup when monitoring stops
 
 ## Alert Format
 
-Each alert includes:
+Each WebSocket alert includes:
 - Token name and symbol
+- Token address
 - Blockchain network
-- DEX name
+- Token status
 - Current price
 - Liquidity
 - Market cap
 - 24h trading volume
-- 24h price change
-- Direct link to DexScreener
+- 24h buy count
+- Direct link to DEX (if available)
+- Timestamp
 
 ## API Rate Limits
 
-The bot checks for new coins 1-2 times per second. Please be aware of DexScreener API rate limits. The bot includes error handling for API failures.
+## WebSocket Connection
+
+The bot uses a persistent WebSocket connection for real-time token updates. This eliminates polling and provides instant notifications when new tokens are detected.
+
+**Benefits:**
+- No rate limiting concerns (single persistent connection)
+- Real-time updates with minimal latency
+- Lower resource usage compared to polling
+- Automatic reconnection on connection failures
+
+**Connection Monitoring:**
+- WebSocket connection status is continuously monitored
+- Automatic reconnection with configurable intervals
+- Telegram alerts for connection failures and recoveries
+- Configurable maximum reconnection attempts
 
 ## 🚨 Error Alerting System
 
@@ -306,13 +419,22 @@ Complete `.env` configuration with error alerting:
 TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
 TELEGRAM_CHAT_ID=123456789
 
+# WebSocket Configuration
+WS_URL=wss://meme-api.openocean.finance/ws/public
+WS_CHANNEL=token
+WS_RECONNECT_INTERVAL=5
+WS_MAX_RECONNECT_ATTEMPTS=0
+WS_PING_INTERVAL=30
+
+# Filter Configuration
+FILTER_LIQUIDITY_MIN=0
+FILTER_LIQUIDITY_MAX=10000000
+FILTER_BUY_COUNT_24H_MIN=0
+FILTER_TOKEN_STATUS=active
+
 # Optional - Error Alerting
 TELEGRAM_ERROR_ALERTS_ENABLED=true
 TELEGRAM_ERROR_DEBUG_MODE=false
-
-# Optional - Solana Configuration
-SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-RAYDIUM_V4_PROGRAM_ID=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
 ```
 
 ### Best Practices
@@ -344,15 +466,48 @@ RAYDIUM_V4_PROGRAM_ID=675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
 
 ## Troubleshooting
 
+### WebSocket Connection Issues
+
+#### WebSocket won't connect
+- Verify `WS_URL` is correct: `wss://meme-api.openocean.finance/ws/public`
+- Check your internet connection and firewall settings
+- Ensure WebSocket connections (wss://) are allowed through your firewall
+- Review console logs for connection error details
+- Check if you're receiving Telegram alerts about connection failures
+
+#### Frequent reconnections
+- This may indicate network instability
+- Consider increasing `WS_RECONNECT_INTERVAL` to reduce reconnection frequency
+- Check console logs for error patterns
+- Verify the OpenOcean API endpoint is available
+- Monitor Telegram for connection status alerts
+
+#### No token updates received
+- Verify the bot shows "WebSocket connected" in logs
+- Check that subscription to "token" channel was successful (look for subscription confirmation in logs)
+- Ensure `WS_CHANNEL=token` is set correctly
+- Verify your filters aren't too restrictive (try relaxing filter settings)
+- Check Telegram for any error alerts
+
+#### Bot stops monitoring after many reconnect attempts
+- If `WS_MAX_RECONNECT_ATTEMPTS` is set to a number > 0, the bot will stop after that many failed attempts
+- Set `WS_MAX_RECONNECT_ATTEMPTS=0` for unlimited reconnection attempts
+- Check the root cause of connection failures in error logs
+- Verify network stability and API endpoint availability
+
 ### Bot doesn't start
 - Verify your `TELEGRAM_BOT_TOKEN` is correct
 - Ensure the token is set as an environment variable
+- Check that all required dependencies are installed: `pip install -r requirements.txt`
+- Review console logs for startup errors
 
 ### No alerts are sent
 - Check that `TELEGRAM_CHAT_ID` is set correctly
 - Verify monitoring is started (use "Start Monitoring" button)
-- Check your filter settings aren't too restrictive
+- Check that WebSocket connection is established (look for "WebSocket connected" in logs)
+- Ensure your filter settings aren't too restrictive
 - Review logs for errors
+- Check that tokens are being received from WebSocket (enable debug logging)
 
 ### Getting your Chat ID
 Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram to get your chat ID.
