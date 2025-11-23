@@ -44,6 +44,11 @@ MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call
                     if isinstance(pairs, list):
                         # Filter for Raydium pairs only
                         raydium_pairs = [pair for pair in pairs if pair.get("platformId") == "raydium"]
+                        
+                        # Sort by pairCreatedAt in descending order (newest first)
+                        # Use epoch time as fallback for pairs without timestamp to ensure they appear last
+                        raydium_pairs = sorted(raydium_pairs, key=lambda x: x.get("pairCreatedAt", "1970-01-01T00:00:00Z"), reverse=True)
+                        
                         logger.info(f"Fetched {len(pairs)} pairs, {len(raydium_pairs)} Raydium pairs from Dexscreener")
                         
                         # Convert pairs to token format for compatibility
