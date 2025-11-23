@@ -887,7 +887,10 @@ class MemeCoinBot:
                     return []
                     
         except aiohttp.ClientError as e:
-            logger.error(f"Network error fetching from PhotonScan: {e}")
+            if "Name or service not known" in str(e):
+                logger.warning(f"DNS resolution failed for PhotonScan API: {e}")
+            else:
+                logger.error(f"Network error fetching from PhotonScan: {e}")
             return []
         except Exception as e:
             error_msg = f"Error fetching tokens from PhotonScan: {e}"
