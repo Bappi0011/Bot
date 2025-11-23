@@ -182,7 +182,7 @@ PHOTON_POLL_INTERVAL = int(os.getenv("PHOTON_POLL_INTERVAL", "60"))
 PHOTON_API_KEY = os.getenv("PHOTON_API_KEY", "")
 
 # Configuration constants
-MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (deprecated, for backward compatibility)
+MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (used by deprecated fetch_new_coins and PhotonScan)
 MAX_TRACKED_PAIRS = 1000  # Maximum number of pairs to keep in memory
 TRACKED_PAIRS_TRIM_SIZE = 500  # Number of pairs to keep when trimming memory
 
@@ -856,15 +856,30 @@ class MemeCoinBot:
                 if resp.status == 200:
                     data = await resp.json()
                     
-                    # Extract tokens from response
-                    # Note: Actual response format may vary - this is a generic implementation
-                    tokens = data.get("tokens", data.get("data", []))
+                    # Extract tokens from response with validation
+                    # Try common response formats: {"tokens": [...]}, {"data": [...]}, or direct array
+                    tokens = None
                     
-                    if isinstance(tokens, list):
+                    if isinstance(data, dict):
+                        # Try "tokens" key first
+                        if "tokens" in data:
+                            tokens = data["tokens"]
+                        # Fallback to "data" key
+                        elif "data" in data:
+                            tokens = data["data"]
+                            logger.debug("PhotonScan response using 'data' key instead of 'tokens'")
+                        else:
+                            logger.warning(f"PhotonScan response has unexpected structure. Keys: {list(data.keys())}")
+                    elif isinstance(data, list):
+                        # Direct array response
+                        tokens = data
+                        logger.debug("PhotonScan response is a direct array")
+                    
+                    if tokens is not None and isinstance(tokens, list):
                         logger.info(f"Fetched {len(tokens)} tokens from PhotonScan")
                         return tokens
                     else:
-                        logger.warning(f"Unexpected response format from PhotonScan: {type(tokens)}")
+                        logger.warning(f"Unexpected response format from PhotonScan: {type(data)}")
                         return []
                 else:
                     error_text = await resp.text()
@@ -917,15 +932,18 @@ class MemeCoinBot:
             # Mint authority filter (True = must be revoked, False = any)
             if photon_filters.get("mint_auth", True):
                 mint_authority = token.get("mint_authority")
-                # If filter is True, we want revoked (None or null)
-                if mint_authority is not None and mint_authority != "":
+                # If filter is True, we want revoked (None, empty string, null, or zero address)
+                # Common representations of revoked authority
+                revoked_values = [None, "", "null", "0x0", "11111111111111111111111111111111"]
+                if mint_authority not in revoked_values:
                     return False
             
             # Freeze authority filter (True = must be revoked, False = any)
             if photon_filters.get("freeze_auth", True):
                 freeze_authority = token.get("freeze_authority")
-                # If filter is True, we want revoked (None or null)
-                if freeze_authority is not None and freeze_authority != "":
+                # If filter is True, we want revoked (None, empty string, null, or zero address)
+                revoked_values = [None, "", "null", "0x0", "11111111111111111111111111111111"]
+                if freeze_authority not in revoked_values:
                     return False
             
             # LP burned filter
@@ -2027,6 +2045,32 @@ async def send_presets_menu(update: Update) -> None:
     await update.message.reply_text(presets_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
+async def send_photon_top10_menu(update: Update) -> None:
+    """Send Photon top10 configuration menu as a new message"""
+    keyboard = [
+        [InlineKeyboardButton("0% - 30%", callback_data="set_photon_top10_0_30")],
+        [InlineKeyboardButton("0% - 50%", callback_data="set_photon_top10_0_50")],
+        [InlineKeyboardButton("0% - 70%", callback_data="set_photon_top10_0_70")],
+        [InlineKeyboardButton("0% - 100%", callback_data="set_photon_top10_0_100")],
+        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_photon_top10_min"),
+         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_photon_top10_max")],
+        [InlineKeyboardButton("◀️ Back", callback_data="config_photon")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    photon_filters = bot_instance.config.get("photon_filters", {})
+    current_min = photon_filters.get("top10_min", 0)
+    current_max = photon_filters.get("top10_max", 100)
+    
+    await update.message.reply_text(
+        f"📊 **Top 10 Holders Percentage**\n\n"
+        f"Current: {current_min}% - {current_max}%\n\n"
+        f"Select range or custom:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
 async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user text input for custom values"""
     
@@ -2242,7 +2286,7 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             
         elif input_type == "photon_top10_max":
             value = float(user_input)
-            if value <= 0 or value > 100:
+            if value < 0 or value > 100:
                 await update.message.reply_text(
                     "❌ Invalid value. Percentage must be between 0 and 100.\n"
                     "Please try again or use /start to cancel."
@@ -2264,32 +2308,6 @@ async def handle_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             "❌ Invalid input. Please enter a valid number.\n"
             "Use /start to cancel and try again."
         )
-
-
-async def send_photon_top10_menu(update: Update) -> None:
-    """Send Photon top10 configuration menu as a new message"""
-    keyboard = [
-        [InlineKeyboardButton("0% - 30%", callback_data="set_photon_top10_0_30")],
-        [InlineKeyboardButton("0% - 50%", callback_data="set_photon_top10_0_50")],
-        [InlineKeyboardButton("0% - 70%", callback_data="set_photon_top10_0_70")],
-        [InlineKeyboardButton("0% - 100%", callback_data="set_photon_top10_0_100")],
-        [InlineKeyboardButton("✏️ Custom Min", callback_data="custom_photon_top10_min"),
-         InlineKeyboardButton("✏️ Custom Max", callback_data="custom_photon_top10_max")],
-        [InlineKeyboardButton("◀️ Back", callback_data="config_photon")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    photon_filters = bot_instance.config.get("photon_filters", {})
-    current_min = photon_filters.get("top10_min", 0)
-    current_max = photon_filters.get("top10_max", 100)
-    
-    await update.message.reply_text(
-        f"📊 **Top 10 Holders Percentage**\n\n"
-        f"Current: {current_min}% - {current_max}%\n\n"
-        f"Select range or custom:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
 
 
 async def view_config(query) -> None:
