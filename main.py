@@ -1021,10 +1021,11 @@ class MemeCoinBot:
                     # Handle different timestamp formats
                     if isinstance(created_at, (int, float)):
                         # Unix timestamp (could be seconds or milliseconds)
+                        # Always create timezone-aware datetime in UTC for consistency
                         if created_at > 10000000000:  # Milliseconds
-                            created_time = datetime.fromtimestamp(created_at / 1000)
+                            created_time = datetime.fromtimestamp(created_at / 1000, timezone.utc)
                         else:  # Seconds
-                            created_time = datetime.fromtimestamp(created_at)
+                            created_time = datetime.fromtimestamp(created_at, timezone.utc)
                     elif isinstance(created_at, str):
                         # ISO format string - try parsing with multiple approaches
                         try:
