@@ -988,6 +988,113 @@ class MemeCoinBot:
             logger.error(f"Error applying Photon filters: {e}")
             return False
     
+    def apply_general_filters_to_photon_token(self, token: Dict) -> bool:
+        """
+        ========================================
+        GENERAL FILTER APPLIER FOR PHOTON TOKENS
+        ========================================
+        Apply general user-defined filters to a PhotonScan token
+        
+        This ensures PhotonScan tokens are subject to the same filtering
+        criteria as WebSocket detected tokens (network, age, liquidity, etc.)
+        
+        Args:
+            token: Token data dictionary from PhotonScan
+            
+        Returns:
+            True if token passes all general filters, False otherwise
+        """
+        try:
+            # Network filter - PhotonScan tokens are Solana-only
+            if self.config["network"] != "all" and self.config["network"] != "solana":
+                logger.debug(f"Token filtered out by network filter: {self.config['network']}")
+                return False
+            
+            # Pair age filter - check when the token was created
+            # PhotonScan may provide creation time in various formats
+            created_at = token.get("created_at") or token.get("createdAt") or token.get("timestamp")
+            
+            if created_at:
+                try:
+                    # Handle different timestamp formats
+                    if isinstance(created_at, (int, float)):
+                        # Unix timestamp (could be seconds or milliseconds)
+                        if created_at > 10000000000:  # Milliseconds
+                            created_time = datetime.fromtimestamp(created_at / 1000)
+                        else:  # Seconds
+                            created_time = datetime.fromtimestamp(created_at)
+                    elif isinstance(created_at, str):
+                        # ISO format string - try parsing directly
+                        try:
+                            # Try ISO format with fromisoformat (Python 3.7+)
+                            created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        except (ValueError, AttributeError):
+                            # Fall back to basic parsing for simple formats
+                            created_time = None
+                    else:
+                        created_time = None
+                    
+                    if created_time:
+                        # Calculate age in minutes
+                        age_minutes = (datetime.now() - created_time).total_seconds() / 60
+                        
+                        # Apply age filter
+                        if not (self.config["pair_age_min"] <= age_minutes <= self.config["pair_age_max"]):
+                            logger.debug(f"Token filtered out by age filter: {age_minutes:.2f} minutes (range: {self.config['pair_age_min']}-{self.config['pair_age_max']})")
+                            return False
+                except Exception as e:
+                    logger.warning(f"Error parsing token creation time: {e}")
+                    # If we can't parse the time, we'll be lenient and not filter it out
+            
+            # Market cap filter
+            market_cap = token.get("market_cap") or token.get("marketCap") or token.get("mcap")
+            if market_cap is not None:
+                try:
+                    market_cap = float(market_cap)
+                    if not (self.config["market_cap_min"] <= market_cap <= self.config["market_cap_max"]):
+                        logger.debug(f"Token filtered out by market cap filter: ${market_cap:,.2f} (range: ${self.config['market_cap_min']:,}-${self.config['market_cap_max']:,})")
+                        return False
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error parsing market cap: {e}")
+            
+            # Liquidity filter
+            liquidity = token.get("liquidity") or token.get("liquidityUsd") or token.get("liquidity_usd")
+            if liquidity is not None:
+                try:
+                    liquidity = float(liquidity)
+                    if not (self.config["liquidity_min"] <= liquidity <= self.config["liquidity_max"]):
+                        logger.debug(f"Token filtered out by liquidity filter: ${liquidity:,.2f} (range: ${self.config['liquidity_min']:,}-${self.config['liquidity_max']:,})")
+                        return False
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error parsing liquidity: {e}")
+            
+            # Social links filter
+            socials = token.get("socials", {})
+            
+            # Check Telegram requirement
+            if self.config["social_links"]["telegram"]:
+                if not socials.get("telegram"):
+                    logger.debug("Token filtered out by social links filter: Telegram required but not present")
+                    return False
+            
+            # Check Twitter requirement
+            if self.config["social_links"]["twitter"]:
+                if not socials.get("twitter"):
+                    logger.debug("Token filtered out by social links filter: Twitter required but not present")
+                    return False
+            
+            # Check Website requirement
+            if self.config["social_links"]["website"]:
+                if not socials.get("website"):
+                    logger.debug("Token filtered out by social links filter: Website required but not present")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error applying general filters to PhotonScan token: {e}")
+            return False
+    
     def format_photon_alert(self, token: Dict) -> str:
         """
         ========================================
@@ -2791,8 +2898,8 @@ async def monitor_photon_tokens(context: ContextTypes.DEFAULT_TYPE) -> None:
                         continue
                     
                     # Apply general filters (network, age, liquidity, etc.)
-                    # Note: We use a simplified check here since PhotonScan tokens
-                    # may have different data structure than Raydium pools
+                    if not bot_instance.apply_general_filters_to_photon_token(token):
+                        continue
                     
                     # Send alert for new token
                     await bot_instance.send_photon_alert(token, telegram_bot=context.bot)
