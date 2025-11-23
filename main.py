@@ -887,7 +887,17 @@ class MemeCoinBot:
                     return []
                     
         except aiohttp.ClientError as e:
-            if "Name or service not known" in str(e):
+            # Check for DNS resolution errors to avoid unnecessary Telegram alerts
+            error_str = str(e).lower()
+            dns_error_patterns = [
+                "name or service not known",
+                "nodename nor servname provided",
+                "temporary failure in name resolution",
+                "no address associated with hostname",
+                "dns resolution failed"
+            ]
+            
+            if any(pattern in error_str for pattern in dns_error_patterns):
                 logger.warning(f"DNS resolution failed for PhotonScan API: {e}")
             else:
                 logger.error(f"Network error fetching from PhotonScan: {e}")
