@@ -1,30 +1,33 @@
 """
-MIGRATION NOTE: WebSocket Streaming Implementation
-====================================================
+MIGRATION NOTE: Solana SPL Token WebSocket Detection
+=====================================================
 
-This bot has been migrated from REST API polling to WebSocket streaming for real-time meme token data.
+This bot has been migrated from Ethereum/BSC OpenOcean API to native Solana WebSocket 
+for real-time SPL token detection.
 
-Previous Implementation:
-- Polled Solana RPC endpoints for Raydium pool data
-- Used getProgramAccountsV2 with pagination
-- Fetched data every ~10 seconds
+Previous Implementation (OpenOcean):
+- Connected to OpenOcean Meme API WebSocket (wss://meme-api.openocean.finance/ws/public)
+- Subscribed to "token" channel for Ethereum/BSC meme tokens
+- Received preprocessed token data from centralized API
 
-Current Implementation:
-- Establishes persistent WebSocket connection to OpenOcean Meme API
-- Subscribes to "token" channel for live token updates
-- Receives real-time streaming data with automatic reconnection
-- WebSocket endpoint: wss://meme-api.openocean.finance/ws/public
-- Data fields extracted: status, liquidity, buyCount24h, and more
+Current Implementation (Solana Native):
+- Establishes WebSocket connection to Solana mainnet (wss://api.mainnet-beta.solana.com)
+- Subscribes to SPL Token Program logs (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA)
+- Listens for MintTo instructions and liquidity add events
+- Parses raw transaction logs for new SPL token mints
+- Detects real-time token creation on Solana blockchain
 
 Benefits:
-- Real-time updates (no polling delay)
-- Reduced API load and rate limiting issues
-- Lower latency for detecting new tokens
-- More efficient resource usage
+- Direct blockchain integration (no third-party API dependency)
+- Real-time SPL token mint detection
+- Detects liquidity pool creation events
+- Lower latency for new Solana meme coins
+- More reliable (no API rate limits or downtime)
 
 Configuration:
-- All WebSocket settings are configurable via environment variables
-- See .env.example for available options
+- SOLANA_WS_URL: Solana WebSocket endpoint
+- SPL_TOKEN_PROGRAM_ID: Token program to monitor
+- All settings configurable via environment variables
 - Automatic reconnection with configurable intervals
 - Telegram alerts for connection failures
 """
@@ -140,18 +143,31 @@ RAYDIUM_V4_PROGRAM_ID = os.getenv("RAYDIUM_V4_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1
 TELEGRAM_ERROR_ALERTS_ENABLED = os.getenv("TELEGRAM_ERROR_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
 TELEGRAM_ERROR_DEBUG_MODE = os.getenv("TELEGRAM_ERROR_DEBUG_MODE", "false").lower() in ("true", "1", "yes")
 
-# WebSocket Configuration
-WS_URL = os.getenv("WS_URL", "wss://meme-api.openocean.finance/ws/public")
-WS_CHANNEL = os.getenv("WS_CHANNEL", "token")
+# ========================================
+# SOLANA WEBSOCKET CONFIGURATION
+# ========================================
+# Solana WebSocket endpoint for real-time blockchain data
+SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "wss://api.mainnet-beta.solana.com")
+
+# SPL Token Program ID - the program responsible for all SPL tokens on Solana
+SPL_TOKEN_PROGRAM_ID = os.getenv("SPL_TOKEN_PROGRAM_ID", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+
+# Raydium Liquidity Pool Program ID (for detecting liquidity adds)
+RAYDIUM_LIQUIDITY_POOL_V4 = os.getenv("RAYDIUM_LIQUIDITY_POOL_V4", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+
+# WebSocket reconnection settings
 WS_RECONNECT_INTERVAL = int(os.getenv("WS_RECONNECT_INTERVAL", "5"))
 WS_MAX_RECONNECT_ATTEMPTS = int(os.getenv("WS_MAX_RECONNECT_ATTEMPTS", "0"))
 WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", "30"))
 
-# Filter Configuration
-FILTER_LIQUIDITY_MIN = float(os.getenv("FILTER_LIQUIDITY_MIN", "0"))
-FILTER_LIQUIDITY_MAX = float(os.getenv("FILTER_LIQUIDITY_MAX", "10000000"))
-FILTER_BUY_COUNT_24H_MIN = int(os.getenv("FILTER_BUY_COUNT_24H_MIN", "0"))
-FILTER_TOKEN_STATUS = os.getenv("FILTER_TOKEN_STATUS", "active").lower()
+# ========================================
+# FILTER CONFIGURATION
+# ========================================
+# Minimum liquidity in SOL (will be converted from token account balances)
+FILTER_LIQUIDITY_MIN_SOL = float(os.getenv("FILTER_LIQUIDITY_MIN_SOL", "0"))
+
+# Track recently seen token mints to avoid duplicate alerts
+TOKEN_ALERT_COOLDOWN_MINUTES = int(os.getenv("TOKEN_ALERT_COOLDOWN_MINUTES", "60"))
 
 # Configuration constants
 MAX_PAIRS_FETCH = 100  # Maximum number of pairs to fetch per API call (deprecated, for backward compatibility)
@@ -221,7 +237,13 @@ class MemeCoinBot:
     
     async def connect_websocket(self, telegram_bot=None) -> bool:
         """
-        Establish WebSocket connection to OpenOcean Meme API
+        ========================================
+        SOLANA WEBSOCKET CONNECTION
+        ========================================
+        Establish WebSocket connection to Solana mainnet RPC
+        
+        This connects to the native Solana WebSocket endpoint to receive
+        real-time blockchain events for SPL token detection.
         
         Args:
             telegram_bot: Optional Telegram bot instance for sending error alerts
@@ -230,11 +252,11 @@ class MemeCoinBot:
             True if connection successful, False otherwise
         """
         try:
-            logger.info(f"Connecting to WebSocket: {WS_URL}")
+            logger.info(f"Connecting to Solana WebSocket: {SOLANA_WS_URL}")
             
-            # Connect to WebSocket with ping settings for keep-alive
+            # Connect to Solana WebSocket endpoint
             self.ws_connection = await websockets.connect(
-                WS_URL,
+                SOLANA_WS_URL,
                 ping_interval=WS_PING_INTERVAL,
                 ping_timeout=10,
                 close_timeout=10
@@ -242,15 +264,15 @@ class MemeCoinBot:
             
             self.ws_connected = True
             self.ws_reconnect_count = 0
-            logger.info("WebSocket connection established")
+            logger.info("Solana WebSocket connection established")
             
-            # Subscribe to the token channel
-            await self.subscribe_to_channel()
+            # Subscribe to SPL Token Program logs for real-time token detection
+            await self.subscribe_to_spl_token_logs()
             
             return True
             
         except WebSocketException as e:
-            error_msg = f"WebSocket connection error: {e}"
+            error_msg = f"Solana WebSocket connection error: {e}"
             logger.error(error_msg, exc_info=True)
             
             # Send Telegram alert for connection failure
@@ -267,7 +289,7 @@ class MemeCoinBot:
                 try:
                     await telegram_bot.send_message(
                         chat_id=TELEGRAM_CHAT_ID,
-                        text=f"⚠️ WebSocket Connection Failed\n\n{error_msg}"
+                        text=f"⚠️ Solana WebSocket Connection Failed\n\n{error_msg}"
                     )
                 except Exception:
                     pass  # Ignore if bot message fails
@@ -276,7 +298,7 @@ class MemeCoinBot:
             return False
             
         except Exception as e:
-            error_msg = f"Unexpected error connecting to WebSocket: {e}"
+            error_msg = f"Unexpected error connecting to Solana WebSocket: {e}"
             logger.error(error_msg, exc_info=True)
             
             if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -290,25 +312,64 @@ class MemeCoinBot:
             self.ws_connected = False
             return False
     
-    async def subscribe_to_channel(self):
-        """Subscribe to the token channel on WebSocket"""
+    async def subscribe_to_spl_token_logs(self):
+        """
+        ========================================
+        SPL TOKEN PROGRAM SUBSCRIPTION
+        ========================================
+        Subscribe to Solana logs for the SPL Token Program
+        
+        This subscribes to all log entries from the SPL Token Program to detect:
+        - MintTo instructions (new token mints)
+        - Transfer instructions (potential liquidity adds)
+        - InitializeMint instructions (new token creation)
+        """
         if not self.ws_connection:
             logger.error("Cannot subscribe: WebSocket not connected")
             return
         
         try:
-            # Prepare subscription message
+            # Subscribe to logs for the SPL Token Program
+            # This will receive all log entries for transactions involving the token program
             subscribe_msg = {
-                "op": "subscribe",
-                "args": [{"channel": WS_CHANNEL}]
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "logsSubscribe",
+                "params": [
+                    {
+                        "mentions": [SPL_TOKEN_PROGRAM_ID]
+                    },
+                    {
+                        "commitment": "confirmed"
+                    }
+                ]
             }
             
-            logger.info(f"Subscribing to channel: {WS_CHANNEL}")
+            logger.info(f"Subscribing to SPL Token Program logs: {SPL_TOKEN_PROGRAM_ID}")
             await self.ws_connection.send(json.dumps(subscribe_msg))
-            logger.info(f"Subscription message sent for channel: {WS_CHANNEL}")
+            logger.info(f"Subscription message sent for SPL Token Program")
+            
+            # Also subscribe to Raydium pool program for liquidity detection
+            raydium_subscribe_msg = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "logsSubscribe",
+                "params": [
+                    {
+                        "mentions": [RAYDIUM_LIQUIDITY_POOL_V4]
+                    },
+                    {
+                        "commitment": "confirmed"
+                    }
+                ]
+            }
+            
+            logger.info(f"Subscribing to Raydium Pool Program logs: {RAYDIUM_LIQUIDITY_POOL_V4}")
+            await self.ws_connection.send(json.dumps(raydium_subscribe_msg))
+            logger.info(f"Subscription message sent for Raydium Pool Program")
             
         except Exception as e:
-            error_msg = f"Error subscribing to channel {WS_CHANNEL}: {e}"
+            error_msg = f"Error subscribing to Solana logs: {e}"
             logger.error(error_msg, exc_info=True)
             
             if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -321,46 +382,55 @@ class MemeCoinBot:
     
     async def handle_websocket_message(self, message: str, telegram_bot=None):
         """
-        Parse and process incoming WebSocket messages
+        ========================================
+        SOLANA LOG MESSAGE PARSER
+        ========================================
+        Parse and process incoming Solana WebSocket log messages
+        
+        This method processes log notifications from the SPL Token Program and
+        Raydium Pool Program to detect:
+        - New token mints (MintTo instructions)
+        - Liquidity pool creation and additions
+        - Token transfers that indicate trading activity
         
         Args:
-            message: Raw WebSocket message string
+            message: Raw WebSocket message string (JSON-RPC format)
             telegram_bot: Optional Telegram bot instance for sending alerts
         """
         try:
-            # Parse JSON message
+            # Parse JSON-RPC message
             data = json.loads(message)
             
             # Log received message for debugging
-            logger.debug(f"Received WebSocket message: {data}")
+            logger.debug(f"Received Solana log message: {data}")
             
-            # Check if it's a subscription confirmation or other system message
-            if isinstance(data, dict):
-                # Handle subscription confirmation
-                if data.get("op") == "subscribe":
-                    logger.info(f"Subscription confirmed: {data}")
+            # Handle subscription confirmation
+            if isinstance(data, dict) and "result" in data:
+                logger.info(f"Subscription confirmed: ID {data.get('id')}, Result: {data.get('result')}")
+                return
+            
+            # Handle log notification from logsSubscribe
+            if isinstance(data, dict) and data.get("method") == "logsNotification":
+                params = data.get("params", {})
+                result = params.get("result", {})
+                
+                # Extract log data
+                logs = result.get("value", {}).get("logs", [])
+                signature = result.get("value", {}).get("signature", "unknown")
+                err = result.get("value", {}).get("err")
+                
+                # Skip failed transactions
+                if err is not None:
+                    logger.debug(f"Skipping failed transaction: {signature}")
                     return
                 
-                # Handle ping/pong messages
-                if data.get("op") == "ping":
-                    # Respond with pong
-                    pong_msg = {"op": "pong"}
-                    await self.ws_connection.send(json.dumps(pong_msg))
-                    return
-                
-                # Extract token data from the message
-                # The exact structure depends on OpenOcean API format
-                # Assuming the data has a 'data' field or direct token info
-                token_data = data.get("data", data)
-                
-                # Process token data if it contains relevant fields
-                if self.is_valid_token_data(token_data):
-                    await self.process_token_data(token_data, telegram_bot)
+                # Process the logs to detect token events
+                await self.process_solana_logs(logs, signature, telegram_bot)
             
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse WebSocket message as JSON: {e}")
+            logger.error(f"Failed to parse Solana log message as JSON: {e}")
         except Exception as e:
-            error_msg = f"Error handling WebSocket message: {e}"
+            error_msg = f"Error handling Solana log message: {e}"
             logger.error(error_msg, exc_info=True)
             
             if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -371,112 +441,52 @@ class MemeCoinBot:
                     exc_info=sys.exc_info()
                 )
     
-    def is_valid_token_data(self, data: Dict) -> bool:
+    async def process_solana_logs(self, logs: List[str], signature: str, telegram_bot=None):
         """
-        Check if the data contains valid token information
+        ========================================
+        SOLANA LOG PROCESSOR
+        ========================================
+        Process Solana transaction logs to detect token mints and liquidity events
+        
+        This method analyzes log entries to identify:
+        - MintTo instructions (new tokens being minted)
+        - InitializeMint instructions (brand new token creation)
+        - Liquidity pool initialization (Raydium pools)
         
         Args:
-            data: Token data dictionary
-            
-        Returns:
-            True if data is valid, False otherwise
-            
-        Note:
-            This validates based on expected OpenOcean Meme API response structure.
-            The API is expected to send messages with token-related fields such as:
-            - 'token', 'tokenAddress', 'address', or 'mint' for token identifier
-            - 'status' for token status (active/inactive)
-            - 'liquidity' for liquidity amount
-            - 'buyCount24h' for 24-hour buy count
-            
-            If the actual API response format differs, these field names should be
-            updated to match the real API specification.
-        """
-        # Check for essential fields that indicate this is token data
-        # Adjust based on actual OpenOcean API response format
-        if not isinstance(data, dict):
-            return False
-        
-        # Look for common token data fields
-        # These field names are based on typical meme token API responses
-        # Update these if OpenOcean API uses different field names
-        has_token_fields = any(key in data for key in [
-            'token', 'tokenAddress', 'address', 'mint',
-            'status', 'liquidity', 'buyCount24h'
-        ])
-        
-        return has_token_fields
-    
-    async def process_token_data(self, token_data: Dict, telegram_bot=None):
-        """
-        Process token data received from WebSocket and apply filters
-        
-        Args:
-            token_data: Token data dictionary from WebSocket
+            logs: List of log strings from the transaction
+            signature: Transaction signature
             telegram_bot: Optional Telegram bot instance for sending alerts
         """
         try:
-            # Extract token identifier (address/mint)
-            token_id = token_data.get("tokenAddress") or token_data.get("address") or \
-                      token_data.get("mint") or token_data.get("token", {}).get("address", "unknown")
+            # Join all logs into a single string for easier pattern matching
+            # Note: Solana instruction logs follow a standardized format where
+            # instruction names appear directly in the log output (e.g., "Instruction: MintTo")
+            # This string-based parsing is reliable for detecting SPL Token instructions
+            log_text = "\n".join(logs)
             
-            # Skip if already alerted
-            if token_id in self.last_checked_pairs:
-                return
+            # Detect MintTo instruction (indicates token minting activity)
+            # SPL Token Program logs explicitly include "MintTo" or "Instruction: MintTo"
+            if "MintTo" in log_text or "Instruction: MintTo" in log_text:
+                logger.info(f"Detected MintTo instruction in transaction {signature}")
+                await self.process_mint_event(logs, signature, telegram_bot)
             
-            # Apply filters
-            if self.apply_filters_to_websocket_data(token_data):
-                # Format and send alert
-                message = self.format_websocket_token_alert(token_data)
+            # Detect InitializeMint (brand new token creation)
+            # SPL Token Program logs explicitly include "InitializeMint" for new tokens
+            elif "InitializeMint" in log_text or "Instruction: InitializeMint" in log_text:
+                logger.info(f"Detected InitializeMint in transaction {signature}")
+                await self.process_new_token_creation(logs, signature, telegram_bot)
+            
+            # Detect Raydium pool initialization or liquidity add
+            # Raydium logs include terms like "initialize", "liquidity", "pool", "swap"
+            elif "initialize" in log_text.lower() and any(
+                phrase in log_text for phrase in ["liquidity", "pool", "swap"]
+            ):
+                logger.info(f"Detected potential liquidity event in transaction {signature}")
+                await self.process_liquidity_event(logs, signature, telegram_bot)
                 
-                if telegram_bot and TELEGRAM_CHAT_ID:
-                    try:
-                        await telegram_bot.send_message(
-                            chat_id=TELEGRAM_CHAT_ID,
-                            text=message,
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"Alert sent for token {token_id}")
-                        
-                        # Track token in active preset
-                        if self.active_preset and self.active_preset in self.presets:
-                            self.presets[self.active_preset]["coins"][token_id] = {
-                                "data": token_data,
-                                "timestamp": datetime.now().isoformat(),
-                                "profit_percent": 0
-                            }
-                        
-                        # Track for signals
-                        if self.config["signals"]:
-                            self.tracked_pairs[token_id] = {
-                                "initial_price": token_data.get("price", 0),
-                                "timestamp": datetime.now(),
-                                "data": token_data
-                            }
-                            
-                    except Exception as e:
-                        error_msg = f"Error sending alert for token {token_id}: {e}"
-                        logger.error(error_msg, exc_info=True)
-                        
-                        if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                            await send_error_alert(
-                                TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                error_msg,
-                                exc_info=sys.exc_info()
-                            )
-                
-                # Mark as alerted
-                self.last_checked_pairs.add(token_id)
-                
-                # Limit memory of checked pairs
-                if len(self.last_checked_pairs) > MAX_TRACKED_PAIRS:
-                    self.last_checked_pairs = set(
-                        list(self.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
-                    )
-                    
         except Exception as e:
-            error_msg = f"Error processing token data: {e}"
+            error_msg = f"Error processing Solana logs for {signature}: {e}"
             logger.error(error_msg, exc_info=True)
             
             if TELEGRAM_ERROR_ALERTS_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -487,114 +497,304 @@ class MemeCoinBot:
                     exc_info=sys.exc_info()
                 )
     
-    def apply_filters_to_websocket_data(self, token_data: Dict) -> bool:
+    async def process_mint_event(self, logs: List[str], signature: str, telegram_bot=None):
         """
-        Apply user-defined filters to WebSocket token data
+        ========================================
+        MINT EVENT PROCESSOR
+        ========================================
+        Process a MintTo instruction to extract token information
         
         Args:
-            token_data: Token data from WebSocket
-            
-        Returns:
-            True if token passes filters, False otherwise
+            logs: Transaction logs
+            signature: Transaction signature
+            telegram_bot: Telegram bot for alerts
         """
         try:
-            # Extract relevant fields from WebSocket data with safe type conversion
-            status = token_data.get("status", "unknown").lower()
+            # Skip if already alerted recently
+            if signature in self.last_checked_pairs:
+                return
             
-            # Safe conversion with fallback to 0
-            try:
-                liquidity = float(token_data.get("liquidity", 0))
-            except (ValueError, TypeError):
-                liquidity = 0
+            # Fetch transaction details from Solana to get token mint address
+            await self.start_session()
             
-            try:
-                buy_count_24h = int(token_data.get("buyCount24h", 0))
-            except (ValueError, TypeError):
-                buy_count_24h = 0
+            # Get transaction data
+            rpc_url = SOLANA_RPC_URL
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTransaction",
+                "params": [
+                    signature,
+                    {"encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}
+                ]
+            }
             
-            # Apply status filter (from environment variable)
-            if FILTER_TOKEN_STATUS != "all":
-                if FILTER_TOKEN_STATUS == "active" and status != "active":
-                    return False
-                elif FILTER_TOKEN_STATUS == "inactive" and status != "inactive":
-                    return False
-            
-            # Apply liquidity filter (use environment variable filters as primary)
-            # These are the min/max thresholds set via environment
-            if not (FILTER_LIQUIDITY_MIN <= liquidity <= FILTER_LIQUIDITY_MAX):
-                return False
-            
-            # Also check against user config liquidity settings if they differ
-            # This allows both env-based and UI-based filtering
-            config_liq_min = self.config.get("liquidity_min", 0)
-            config_liq_max = self.config.get("liquidity_max", float('inf'))
-            if not (config_liq_min <= liquidity <= config_liq_max):
-                return False
-            
-            # Apply buy count filter (from environment variable)
-            if buy_count_24h < FILTER_BUY_COUNT_24H_MIN:
-                return False
-            
-            # Apply network filter from config
-            network = token_data.get("network", "").lower()
-            if self.config["network"] != "all" and network and self.config["network"].lower() != network:
-                return False
-            
-            return True
-            
+            async with self.session.post(rpc_url, json=payload) as resp:
+                if resp.status == 200:
+                    tx_data = await resp.json()
+                    result = tx_data.get("result", {})
+                    
+                    if result:
+                        # Extract token mint addresses from parsed transaction
+                        token_data = self.extract_token_from_transaction(result, signature)
+                        
+                        if token_data:
+                            # Send alert for new token mint
+                            await self.send_token_alert(token_data, telegram_bot)
+                            
+                            # Mark as alerted
+                            self.last_checked_pairs.add(signature)
+                            
+                            # Limit memory
+                            if len(self.last_checked_pairs) > MAX_TRACKED_PAIRS:
+                                self.last_checked_pairs = set(
+                                    list(self.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
+                                )
+                                
         except Exception as e:
-            logger.error(f"Error applying filters to WebSocket data: {e}")
-            return False
+            logger.error(f"Error processing mint event {signature}: {e}")
     
-    def format_websocket_token_alert(self, token_data: Dict) -> str:
+    async def process_new_token_creation(self, logs: List[str], signature: str, telegram_bot=None):
         """
-        Format WebSocket token data for alert message
+        ========================================
+        NEW TOKEN CREATION PROCESSOR
+        ========================================
+        Process InitializeMint instruction for brand new token
         
         Args:
-            token_data: Token data from WebSocket
+            logs: Transaction logs
+            signature: Transaction signature
+            telegram_bot: Telegram bot for alerts
+        """
+        # For now, treat similar to MintTo
+        await self.process_mint_event(logs, signature, telegram_bot)
+    
+    async def process_liquidity_event(self, logs: List[str], signature: str, telegram_bot=None):
+        """
+        ========================================
+        LIQUIDITY EVENT PROCESSOR
+        ========================================
+        Process Raydium pool initialization or liquidity add
+        
+        Args:
+            logs: Transaction logs
+            signature: Transaction signature
+            telegram_bot: Telegram bot for alerts
+        """
+        try:
+            # Skip if already alerted recently
+            if signature in self.last_checked_pairs:
+                return
+            
+            # Fetch transaction details
+            await self.start_session()
+            
+            rpc_url = SOLANA_RPC_URL
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTransaction",
+                "params": [
+                    signature,
+                    {"encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}
+                ]
+            }
+            
+            async with self.session.post(rpc_url, json=payload) as resp:
+                if resp.status == 200:
+                    tx_data = await resp.json()
+                    result = tx_data.get("result", {})
+                    
+                    if result:
+                        # Extract liquidity pool information
+                        pool_data = self.extract_pool_from_transaction(result, signature)
+                        
+                        if pool_data:
+                            # Send alert for new liquidity pool
+                            await self.send_pool_alert(pool_data, telegram_bot)
+                            
+                            # Mark as alerted
+                            self.last_checked_pairs.add(signature)
+                            
+                            # Limit memory
+                            if len(self.last_checked_pairs) > MAX_TRACKED_PAIRS:
+                                self.last_checked_pairs = set(
+                                    list(self.last_checked_pairs)[-TRACKED_PAIRS_TRIM_SIZE:]
+                                )
+                                
+        except Exception as e:
+            logger.error(f"Error processing liquidity event {signature}: {e}")
+    
+    def extract_token_from_transaction(self, tx_result: Dict, signature: str) -> Optional[Dict]:
+        """
+        ========================================
+        TOKEN DATA EXTRACTOR
+        ========================================
+        Extract token mint information from parsed transaction data
+        
+        Args:
+            tx_result: Parsed transaction result from getTransaction
+            signature: Transaction signature
             
         Returns:
-            Formatted alert message string
+            Dictionary with token data or None
         """
-        # Extract fields from WebSocket data
-        token_address = token_data.get("tokenAddress") or token_data.get("address", "Unknown")
-        token_name = token_data.get("name", "Unknown Token")
-        token_symbol = token_data.get("symbol", "???")
-        network = token_data.get("network", "Unknown")
-        status = token_data.get("status", "Unknown")
-        liquidity = token_data.get("liquidity", 0)
-        buy_count_24h = token_data.get("buyCount24h", 0)
-        price = token_data.get("price", 0)
-        market_cap = token_data.get("marketCap", 0)
-        volume_24h = token_data.get("volume24h", 0)
+        try:
+            meta = tx_result.get("meta", {})
+            transaction = tx_result.get("transaction", {})
+            message = transaction.get("message", {})
+            instructions = message.get("instructions", [])
+            
+            # Look for token mints in postTokenBalances
+            post_balances = meta.get("postTokenBalances", [])
+            
+            for balance in post_balances:
+                mint = balance.get("mint")
+                if mint:
+                    # Found a token mint
+                    ui_amount = balance.get("uiTokenAmount", {})
+                    amount = ui_amount.get("uiAmountString", "0")
+                    decimals = ui_amount.get("decimals", 0)
+                    
+                    return {
+                        "mint": mint,
+                        "amount": amount,
+                        "decimals": decimals,
+                        "signature": signature,
+                        "timestamp": datetime.now()
+                    }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting token from transaction: {e}")
+            return None
+    
+    def extract_pool_from_transaction(self, tx_result: Dict, signature: str) -> Optional[Dict]:
+        """
+        ========================================
+        POOL DATA EXTRACTOR
+        ========================================
+        Extract Raydium pool information from transaction
         
-        # Format the message
-        message = f"🚀 **New Meme Token Detected!** (WebSocket)\n\n"
-        message += f"**Token:** {token_name} ({token_symbol})\n"
-        message += f"**Address:** `{token_address}`\n"
-        message += f"**Network:** {network.capitalize()}\n"
-        message += f"**Status:** {status.capitalize()}\n\n"
+        Args:
+            tx_result: Parsed transaction result
+            signature: Transaction signature
+            
+        Returns:
+            Dictionary with pool data or None
+        """
+        try:
+            meta = tx_result.get("meta", {})
+            transaction = tx_result.get("transaction", {})
+            
+            # Extract token mints from postTokenBalances
+            post_balances = meta.get("postTokenBalances", [])
+            
+            if len(post_balances) >= 2:
+                # Likely a pool with at least 2 tokens
+                tokens = []
+                for balance in post_balances[:2]:
+                    mint = balance.get("mint")
+                    if mint:
+                        tokens.append(mint)
+                
+                if len(tokens) >= 2:
+                    return {
+                        "baseMint": tokens[0],
+                        "quoteMint": tokens[1],
+                        "signature": signature,
+                        "timestamp": datetime.now()
+                    }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting pool from transaction: {e}")
+            return None
+    
+    async def send_token_alert(self, token_data: Dict, telegram_bot=None):
+        """
+        ========================================
+        TOKEN ALERT SENDER
+        ========================================
+        Send Telegram alert for newly detected SPL token
         
-        if liquidity > 0:
-            message += f"**Liquidity:** ${liquidity:,.2f}\n"
-        if market_cap > 0:
-            message += f"**Market Cap:** ${market_cap:,.2f}\n"
-        if price > 0:
-            message += f"**Price:** ${price:.8f}\n"
-        if volume_24h > 0:
-            message += f"**24h Volume:** ${volume_24h:,.2f}\n"
-        if buy_count_24h > 0:
-            message += f"**24h Buys:** {buy_count_24h}\n"
+        Args:
+            token_data: Token information dictionary
+            telegram_bot: Telegram bot instance
+        """
+        try:
+            mint = token_data.get("mint", "Unknown")
+            amount = token_data.get("amount", "0")
+            signature = token_data.get("signature", "Unknown")
+            
+            message = f"🚀 **New SPL Token Mint Detected!**\n\n"
+            message += f"**Token Mint:** `{mint}`\n"
+            message += f"**Amount Minted:** {amount}\n"
+            message += f"**Transaction:** `{signature}`\n"
+            message += f"**Network:** Solana\n\n"
+            message += f"**Explorer:** https://solscan.io/tx/{signature}\n"
+            message += f"**Token:** https://solscan.io/token/{mint}\n"
+            message += f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+            
+            if telegram_bot and TELEGRAM_CHAT_ID:
+                try:
+                    await telegram_bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Alert sent for token mint {mint}")
+                    
+                except Exception as e:
+                    error_msg = f"Error sending alert for token {mint}: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    
+        except Exception as e:
+            logger.error(f"Error in send_token_alert: {e}")
+    
+    async def send_pool_alert(self, pool_data: Dict, telegram_bot=None):
+        """
+        ========================================
+        POOL ALERT SENDER
+        ========================================
+        Send Telegram alert for newly detected liquidity pool
         
-        # Add links if available
-        dex_url = token_data.get("dexUrl") or token_data.get("url")
-        if dex_url:
-            message += f"\n**DEX Link:** {dex_url}\n"
-        
-        # Add timestamp
-        message += f"\n**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-        
-        return message
+        Args:
+            pool_data: Pool information dictionary
+            telegram_bot: Telegram bot instance
+        """
+        try:
+            base_mint = pool_data.get("baseMint", "Unknown")
+            quote_mint = pool_data.get("quoteMint", "Unknown")
+            signature = pool_data.get("signature", "Unknown")
+            
+            message = f"💧 **New Liquidity Pool Detected!**\n\n"
+            message += f"**Base Token:** `{base_mint}`\n"
+            message += f"**Quote Token:** `{quote_mint}`\n"
+            message += f"**Transaction:** `{signature}`\n"
+            message += f"**Network:** Solana\n"
+            message += f"**DEX:** Raydium\n\n"
+            message += f"**Explorer:** https://solscan.io/tx/{signature}\n"
+            message += f"**Base Token:** https://solscan.io/token/{base_mint}\n"
+            message += f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+            
+            if telegram_bot and TELEGRAM_CHAT_ID:
+                try:
+                    await telegram_bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Alert sent for liquidity pool {base_mint}/{quote_mint}")
+                    
+                except Exception as e:
+                    error_msg = f"Error sending pool alert: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    
+        except Exception as e:
+            logger.error(f"Error in send_pool_alert: {e}")
     
     async def fetch_new_coins(self) -> List[Dict]:
         """
