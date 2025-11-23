@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY main.py .
+COPY error_handler.py .
 
 # Run the bot
 CMD ["python", "main.py"]
