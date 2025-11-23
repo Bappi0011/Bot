@@ -1425,7 +1425,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks"""
+    """Handle button callbacks
+    
+    Note: Conflict errors may occur if multiple bot instances are running simultaneously.
+    Ensure only one instance is active to avoid "Message is not modified" errors.
+    """
     query = update.callback_query
     await query.answer()
     
@@ -1462,7 +1466,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("toggle_social_"):
         await toggle_social(query, data.split("_")[2])
     elif data.startswith("toggle_photon_"):
-        await toggle_photon_filter(query, data.split("_")[2])
+        # Extract filter name correctly for multi-part names (e.g., social_tg, freeze_auth)
+        await toggle_photon_filter(query, "_".join(data.split("_")[2:]))
     elif data.startswith("set_age_"):
         await set_age(query, data)
     elif data.startswith("set_mc_"):
