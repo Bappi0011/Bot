@@ -40,7 +40,7 @@ import base64
 import base58
 import time
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import aiohttp
 import websockets
@@ -1016,6 +1016,8 @@ class MemeCoinBot:
             
             if created_at:
                 try:
+                    created_time = None
+                    
                     # Handle different timestamp formats
                     if isinstance(created_at, (int, float)):
                         # Unix timestamp (could be seconds or milliseconds)
@@ -1024,26 +1026,51 @@ class MemeCoinBot:
                         else:  # Seconds
                             created_time = datetime.fromtimestamp(created_at)
                     elif isinstance(created_at, str):
-                        # ISO format string - try parsing directly
+                        # ISO format string - try parsing with multiple approaches
                         try:
                             # Try ISO format with fromisoformat (Python 3.7+)
-                            created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            # Handle common timezone formats
+                            timestamp_str = created_at
+                            # Replace 'Z' with '+00:00' for UTC
+                            if timestamp_str.endswith('Z'):
+                                timestamp_str = timestamp_str[:-1] + '+00:00'
+                            # Handle other common formats like '+00:00', '-05:00', etc.
+                            created_time = datetime.fromisoformat(timestamp_str)
                         except (ValueError, AttributeError):
-                            # Fall back to basic parsing for simple formats
-                            created_time = None
-                    else:
-                        created_time = None
+                            # Try alternative parsing for other date formats
+                            try:
+                                # Handle timestamp like '2024-01-15 12:30:45'
+                                created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                try:
+                                    # Handle timestamp like '2024-01-15T12:30:45'
+                                    created_time = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%S')
+                                except ValueError:
+                                    # Unable to parse - log and continue
+                                    logger.info(f"Could not parse timestamp format for token: {created_at}")
+                                    created_time = None
                     
                     if created_time:
-                        # Calculate age in minutes
-                        age_minutes = (datetime.now() - created_time).total_seconds() / 60
+                        # Calculate age in minutes using UTC to ensure consistency
+                        # If created_time is naive, assume it's UTC
+                        if created_time.tzinfo is None:
+                            created_time = created_time.replace(tzinfo=timezone.utc)
+                        
+                        now_utc = datetime.now(timezone.utc)
+                        age_minutes = (now_utc - created_time).total_seconds() / 60
                         
                         # Apply age filter
                         if not (self.config["pair_age_min"] <= age_minutes <= self.config["pair_age_max"]):
                             logger.debug(f"Token filtered out by age filter: {age_minutes:.2f} minutes (range: {self.config['pair_age_min']}-{self.config['pair_age_max']})")
                             return False
+                    else:
+                        # Log when age filtering is bypassed due to unparseable timestamp
+                        logger.info(f"Token age filtering bypassed - could not parse timestamp: {created_at}")
+                        
                 except Exception as e:
-                    logger.warning(f"Error parsing token creation time: {e}")
+                    # Log the error and which token bypassed age filtering
+                    token_identifier = token.get("mint") or token.get("address") or "unknown"
+                    logger.warning(f"Error parsing token creation time for {token_identifier}: {e}. Age filter bypassed for this token.")
                     # If we can't parse the time, we'll be lenient and not filter it out
             
             # Market cap filter
