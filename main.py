@@ -460,19 +460,25 @@ class MemeCoinBot:
         """
         try:
             # Join all logs into a single string for easier pattern matching
+            # Note: Solana instruction logs follow a standardized format where
+            # instruction names appear directly in the log output (e.g., "Instruction: MintTo")
+            # This string-based parsing is reliable for detecting SPL Token instructions
             log_text = "\n".join(logs)
             
             # Detect MintTo instruction (indicates token minting activity)
+            # SPL Token Program logs explicitly include "MintTo" or "Instruction: MintTo"
             if "MintTo" in log_text or "Instruction: MintTo" in log_text:
                 logger.info(f"Detected MintTo instruction in transaction {signature}")
                 await self.process_mint_event(logs, signature, telegram_bot)
             
             # Detect InitializeMint (brand new token creation)
+            # SPL Token Program logs explicitly include "InitializeMint" for new tokens
             elif "InitializeMint" in log_text or "Instruction: InitializeMint" in log_text:
                 logger.info(f"Detected InitializeMint in transaction {signature}")
                 await self.process_new_token_creation(logs, signature, telegram_bot)
             
             # Detect Raydium pool initialization or liquidity add
+            # Raydium logs include terms like "initialize", "liquidity", "pool", "swap"
             elif "initialize" in log_text.lower() and any(
                 phrase in log_text for phrase in ["liquidity", "pool", "swap"]
             ):
@@ -512,7 +518,7 @@ class MemeCoinBot:
             await self.start_session()
             
             # Get transaction data
-            tx_url = f"{SOLANA_RPC_URL}"
+            rpc_url = SOLANA_RPC_URL
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -523,7 +529,7 @@ class MemeCoinBot:
                 ]
             }
             
-            async with self.session.post(tx_url, json=payload) as resp:
+            async with self.session.post(rpc_url, json=payload) as resp:
                 if resp.status == 200:
                     tx_data = await resp.json()
                     result = tx_data.get("result", {})
@@ -583,7 +589,7 @@ class MemeCoinBot:
             # Fetch transaction details
             await self.start_session()
             
-            tx_url = f"{SOLANA_RPC_URL}"
+            rpc_url = SOLANA_RPC_URL
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -594,7 +600,7 @@ class MemeCoinBot:
                 ]
             }
             
-            async with self.session.post(tx_url, json=payload) as resp:
+            async with self.session.post(rpc_url, json=payload) as resp:
                 if resp.status == 200:
                     tx_data = await resp.json()
                     result = tx_data.get("result", {})
